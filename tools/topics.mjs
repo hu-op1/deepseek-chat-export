@@ -20,6 +20,7 @@ import {
   annotationPrompt,
   buildSnippet,
   mergePrompt,
+  mergeTarget,
   monthOf,
   normalizeAnnotation,
   normalizeMerge,
@@ -83,15 +84,40 @@ async function runMerge({ client, records, outDir, grain }) {
     return null;
   }
 
-  log(`\n正在把 ${labelCounts.length} 个原始标签归并成约 ${grain} 个规范主题…`);
-  const { data, usage } = await client.json({
-    system: MERGE_SYSTEM,
-    user: mergePrompt(labelCounts, grain),
-    maxTokens: 4000,
-    temperature: 0,
-  });
+  const target = mergeTarget(labelCounts, grain);
+  const knownLabels = labelCounts.map((item) => item.label);
 
-  const { topics, missing } = normalizeMerge(data, labelCounts.map((item) => item.label));
+  log(`\n正在把 ${labelCounts.length} 个原始标签归并成不超过 ${target} 个规范主题…`);
+
+  // 推理模型偶尔会返回 {"topics":[]} 或漏掉大半标签。
+  // 这种情况必须重试，绝不能把半成品当成归并结果写下去。
+  let best = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const { data, usage } = await client.json({
+      system: MERGE_SYSTEM,
+      user: mergePrompt(labelCounts, target),
+      maxTokens: 4000,
+      temperature: 0,
+    });
+
+    const result = normalizeMerge(data, knownLabels);
+    const covered = knownLabels.length - result.missing.length;
+    const good = result.topics.length > 1 && covered >= knownLabels.length * 0.75;
+
+    if (!best || covered > best.covered) best = { result, usage, covered };
+    if (good) break;
+
+    log(`  · 第 ${attempt} 次归并只覆盖 ${covered}/${knownLabels.length} 个标签、产出 ${result.topics.length} 个主题，重试…`);
+  }
+
+  if (!best || best.result.topics.length <= 1) {
+    log('\n! 归并失败：模型没有给出可用的标签映射。');
+    log('  换个更稳的模型重试：node tools/topics.mjs --merge-only --base-url … --model <别的模型>');
+    return null;
+  }
+
+  const { topics, missing } = best.result;
+  const { usage } = best;
   const canonical = {
     generatedAt: new Date().toISOString(),
     grain,
@@ -110,8 +136,8 @@ async function runMerge({ client, records, outDir, grain }) {
   if (missing.length) {
     log(`  ! 有 ${missing.length} 个标签没被归并（已收进"其他"）：${missing.slice(0, 8).join('、')}`);
   }
-  if (topics.length > grain * 2.5 || topics.length < grain * 0.4) {
-    log(`  ! 主题数量 ${topics.length} 与目标 ${grain} 偏差较大，可以用 --merge-only --grain ${grain} 再调一次`);
+  if (topics.length > target * 1.6) {
+    log(`  ! 主题数量 ${topics.length} 明显多于上限 ${target}，考虑加大 --grain 或检查提示词`);
   }
 
   return canonical;

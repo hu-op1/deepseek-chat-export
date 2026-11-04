@@ -7,6 +7,7 @@ import {
   annotationPrompt,
   buildSnippet,
   mergePrompt,
+  mergeTarget,
   monthOf,
   normalizeAnnotation,
   normalizeMerge,
@@ -147,6 +148,33 @@ test('normalizeMerge：只保留已知标签，漏掉的归"其他"', () => {
 test('normalizeMerge：规范名本身是原始标签时也能对上', () => {
   const { topics } = normalizeMerge({ topics: [{ id: 't1', label: '显卡', aliases: [] }] }, ['显卡']);
   assert.deepEqual(topics[0].aliases, ['显卡']);
+});
+
+test('normalizeMerge：模型返回空 topics 时不能捏造一个只含"其他"的映射', () => {
+  // 真实踩到过：推理模型返回 {"topics":[]}，旧实现把 22 个标签全塞进"其他"，
+  // 还顺利写盘，下游以为归并成功，产出的图谱全是"其他"。
+  const known = ['代码', '编程', '显卡'];
+  const empty = normalizeMerge({ topics: [] }, known);
+  assert.deepEqual(empty.topics, [], '没有主题就不该产出主题');
+  assert.deepEqual(empty.missing, known, '所有标签都要报告为未覆盖');
+
+  const garbage = normalizeMerge({ topics: 'not-an-array' }, known);
+  assert.deepEqual(garbage.topics, []);
+});
+
+test('mergeTarget：小样本时不强求归并成很多类', () => {
+  // 22 个标签不可能归并成 30 个，旧提示词让模型陷入自相矛盾并烧光推理预算
+  assert.equal(mergeTarget(Array.from({ length: 22 }, (_, i) => ({ label: `t${i}` })), 30), 15);
+  assert.equal(mergeTarget(Array.from({ length: 200 }, (_, i) => ({ label: `t${i}` })), 30), 30);
+  assert.equal(mergeTarget(Array.from({ length: 6 }, (_, i) => ({ label: `t${i}` })), 30), 5);
+});
+
+test('mergePrompt：目标数是"不超过"，且不再自相矛盾', () => {
+  const labels = Array.from({ length: 22 }, (_, i) => ({ label: `标签${i}`, count: 1 }));
+  const prompt = mergePrompt(labels, mergeTarget(labels, 30));
+  assert.match(prompt, /不超过 15 个/);
+  assert.match(prompt, /不要为了凑数硬拆/);
+  assert.doesNotMatch(prompt, /大约 30 个/, '不能要求把 22 个标签归并成 30 个');
 });
 
 /* ───────────────── 聚合 ───────────────── */
