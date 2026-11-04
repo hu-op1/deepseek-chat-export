@@ -24,7 +24,7 @@ import { renderAtlasHtml } from '../lib/atlas-html.mjs';
 import { renderGraphHtml } from '../lib/graph-html.mjs';
 import { loadIndex } from '../lib/store.mjs';
 import { firstUserText, monthOf, sessionMessages } from '../lib/topics.mjs';
-import { layout, renderChat, renderError, renderOverview, renderSearch, renderTasks, renderTimeline } from '../lib/web.mjs';
+import { layout, renderChat, renderChatList, renderError, renderOverview, renderSearch, renderTasks, renderTimeline } from '../lib/web.mjs';
 import { TASKS, executeTask } from '../lib/tasks.mjs';
 import { loadConfig, resolveRuntime, saveConfig } from '../lib/config.mjs';
 import { oneLine } from '../lib/util.mjs';
@@ -333,6 +333,49 @@ export function main(argv = process.argv.slice(2)) {
           }));
 
         return page(layout({ title: '时间线', active: 'timeline', body: renderTimeline({ months }) }));
+      }
+
+      if (url.pathname === '/chats') {
+        const index = getIndex();
+        const notes = conversationNotes();
+        const activeMonth = (url.searchParams.get('month') ?? '').trim();
+        const pageNo = Math.max(1, Number(url.searchParams.get('page') ?? 1) || 1);
+        const perPage = 50;
+
+        const toMsOf = (value) => (value > 1e11 ? value : value * 1000);
+
+        const all = Object.entries(index.sessions)
+          .filter(([, e]) => e.file)
+          .map(([id, e]) => ({
+            id,
+            title: e.title || '(无标题)',
+            month: monthOfValue(e.updated_at) ?? '',
+            date: e.updated_at,
+            summary: notes.get(id)?.summary ?? '',
+            topics: topicLabelsOf(notes.get(id)?.topics, 3),
+            messageCount: e.message_count ?? 0,
+            ts: toMsOf(Number(e.updated_at)) || 0,
+          }))
+          .sort((a, b) => b.ts - a.ts);
+
+        const counts = new Map();
+        for (const item of all) if (item.month) counts.set(item.month, (counts.get(item.month) ?? 0) + 1);
+        const months = [...counts.entries()]
+          .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+          .map(([month, count]) => ({ month, count }));
+
+        const filtered = activeMonth ? all.filter((item) => item.month === activeMonth) : all;
+        const pages = Math.max(1, Math.ceil(filtered.length / perPage));
+        const safePage = Math.min(pageNo, pages);
+        const items = filtered.slice((safePage - 1) * perPage, safePage * perPage);
+
+        return page(
+          layout({
+            title: '全部对话',
+            active: 'chats',
+            body: renderChatList({ items, months, activeMonth, page: safePage, pages, total: filtered.length }),
+          }),
+        );
       }
 
       if (url.pathname === '/search') {
