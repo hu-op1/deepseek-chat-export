@@ -13,7 +13,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { parseArgs, usage } from '../lib/args.mjs';
-import { createLlmClient, LlmError } from '../lib/llm.mjs';
+import { createLlmClient, LlmError, withShrinkingInput } from '../lib/llm.mjs';
 import { atomicWriteJson, loadIndex } from '../lib/store.mjs';
 import {
   ANNOTATION_SYSTEM,
@@ -38,7 +38,7 @@ const SPEC = {
   limit: { type: 'number', default: 0, desc: '只标注最近 N 个（先小样本试质量）' },
   force: { type: 'boolean', desc: '忽略已有标注，全部重标' },
   'merge-only': { type: 'boolean', desc: '只重跑归并步骤' },
-  'max-chars': { type: 'number', default: 6000, desc: '每个对话送进模型的字符上限' },
+  'max-chars': { type: 'number', default: 1000000, desc: '每个对话送进模型的字符上限（默认不限；超出模型上下文时会自动减半重试）' },
   grain: { type: 'number', default: 30, desc: '归并后的主题数量（默认 30）' },
   'max-tokens': { type: 'number', default: 2500, desc: '单次标注的输出上限（推理模型要给够，否则会触发重试）' },
   concurrency: { type: 'number', default: 3, desc: '并发数（默认 3）' },
@@ -264,18 +264,30 @@ export async function main(argv = process.argv.slice(2)) {
         const messages = sessionMessages(sessionJson);
         if (messages.length === 0) throw new Error('对话没有可读内容');
 
-        const { text, truncated, fullChars } = buildSnippet(messages, options['max-chars']);
         // updated_at 可能是秒也可能是毫秒
         const rawUpdated = Number(entry.updated_at);
         const millis = rawUpdated > 1e11 ? rawUpdated : rawUpdated * 1000;
         const month = monthOf(millis);
 
-        const { data, usage } = await client.json({
-          system: ANNOTATION_SYSTEM,
-          user: annotationPrompt({ title: entry.title, month, snippet: text, truncated }),
-          maxTokens: options['max-tokens'],
-          temperature: 0,
-        });
+        // 上限放得很宽（默认 100 万字，等于不截断）时，超长对话会撑爆模型上下文。
+        // withShrinkingInput 会在 400/413 时把输入减半重试，只影响撑爆的那几条。
+        const { data, usage, chars } = await withShrinkingInput(
+          (userText) =>
+            client.json({
+              system: ANNOTATION_SYSTEM,
+              user: userText,
+              maxTokens: options['max-tokens'],
+              temperature: 0,
+            }),
+          (budget) => {
+            const snip = buildSnippet(messages, budget);
+            return annotationPrompt({ title: entry.title, month, snippet: snip.text, truncated: snip.truncated });
+          },
+          { maxChars: options['max-chars'], log },
+        );
+
+        const fullChars = buildSnippet(messages, 1e9).fullChars;
+        const truncated = chars < fullChars;
 
         const annotation = normalizeAnnotation(data);
         if (annotation.topics.length === 0) throw new Error('模型没给出任何可用主题');

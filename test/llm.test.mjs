@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
-import { createLlmClient, LlmError } from '../lib/llm.mjs';
+import { createLlmClient, isContextError, LlmError, withShrinkingInput } from '../lib/llm.mjs';
 
 /**
  * 造一个假端点。
@@ -137,5 +137,76 @@ test('鉴权失败不重试，直接抛 auth', async (t) => {
       assert.equal(error.kind, 'auth');
       return true;
     },
+  );
+});
+
+test('isContextError 只认"输入太长"这一种 400', () => {
+  const make = (status, message) => {
+    const error = new LlmError('http', message, { status });
+    return error;
+  };
+
+  assert.equal(isContextError(make(400, '模型端返回 HTTP 400：maximum context length exceeded')), true);
+  assert.equal(isContextError(make(400, 'This model\'s maximum context length is 128000 tokens')), true);
+  assert.equal(isContextError(make(413, 'request entity too large')), true);
+  assert.equal(isContextError(make(400, 'invalid response_format')), false, '别的 400 不该被当成超长');
+  assert.equal(isContextError(make(401, 'context')), false, '鉴权错误不该重试');
+  assert.equal(isContextError(new Error('context length')), false, '非 LlmError 不认');
+});
+
+test('输入超长时自动减半重试，直到装得下', async (t) => {
+  const LIMIT = 600;
+  const attempts = [];
+
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => (raw += c));
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}');
+      const user = (body.messages || []).find((m) => m.role === 'user')?.content ?? '';
+      attempts.push(user.length);
+
+      if (user.length > LIMIT) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'maximum context length exceeded' } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(ok({ chars: user.length })));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const client = createLlmClient({ baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: 'mock' });
+  const result = await withShrinkingInput(
+    (userText) => client.json({ system: 's', user: userText }),
+    (chars) => 'x'.repeat(chars),
+    { maxChars: 9600, floor: 100 },
+  );
+
+  assert.equal(result.chars <= LIMIT, true, '最终输入必须装得下');
+  assert.equal(result.data.chars, result.chars, 'chars 应该是实际长度而不是预算');
+  assert.ok(attempts.length >= 2, '应该重试过');
+  assert.deepEqual(attempts, [9600, 4800, 2400, 1200, 600], '每失败一次就减半');
+});
+
+test('非超长的错误不会触发缩减', async (t) => {
+  const server = await startServer(() => ({}));
+  await server.close();
+
+  const bad = http.createServer((req, res) => {
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'invalid model' } }));
+  });
+  await new Promise((resolve) => bad.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => bad.close(resolve)));
+
+  const client = createLlmClient({ baseUrl: `http://127.0.0.1:${bad.address().port}/v1`, model: 'mock' });
+  await assert.rejects(() =>
+    withShrinkingInput((userText) => client.json({ system: 's', user: userText }), (chars) => 'x'.repeat(chars), {
+      maxChars: 1000,
+      floor: 100,
+    }),
   );
 });
