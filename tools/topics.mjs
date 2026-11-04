@@ -39,9 +39,11 @@ const SPEC = {
   force: { type: 'boolean', desc: '忽略已有标注，全部重标' },
   'redo-stale': { type: 'boolean', desc: '重标那些上次用了更小 --max-chars 的对话（额度变大后补跑用）' },
   'merge-only': { type: 'boolean', desc: '只重跑归并步骤' },
+  'no-merge': { type: 'boolean', desc: '跳过 LLM 归并（改用 tools/cluster.mjs 做向量聚类）' },
   'max-chars': { type: 'number', default: 1000000, desc: '每个对话送进模型的字符上限（默认不限；超出模型上下文时会自动减半重试）' },
   grain: { type: 'number', default: 30, desc: '归并后的主题数量（默认 30）' },
-  'max-tokens': { type: 'number', default: 2500, desc: '单次标注的输出上限（推理模型要给够，否则会触发重试）' },
+  'max-tokens': { type: 'number', default: 8000, desc: '单次标注的输出上限（推理模型要给够，否则会触发重试）' },
+  'no-think': { type: 'boolean', desc: '给输入加 /no_think 让模型少思考（实测 glm 快 45%，思考 405→233 token）' },
   concurrency: { type: 'number', default: 3, desc: '并发数（默认 3）' },
   delay: { type: 'number', default: 400, desc: '请求最小间隔毫秒（默认 400）' },
   'dry-run': { type: 'boolean', desc: '只打印将要标注的清单，不调用模型' },
@@ -146,7 +148,7 @@ async function runMerge({ client, records, outDir, grain }) {
         system: MERGE_SYSTEM,
         user: mergePrompt(labelCounts, target),
         // 标签越多，输出越长；推理模型还要额外预算
-        maxTokens: Math.min(16000, 4000 + labelCounts.length * 6),
+        maxTokens: Math.min(32000, 8000 + labelCounts.length * 8),
         temperature: 0,
       });
 
@@ -276,6 +278,7 @@ export async function main(argv = process.argv.slice(2)) {
       baseUrl: options['base-url'],
       apiKey,
       model: options.model,
+      noThink: Boolean(options['no-think']),
       gate: createGate({ gapMs: options.delay, maxGapMs: 10000 }),
       log,
     });
@@ -370,13 +373,16 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   const records = loadRecords(topicDir);
-  if (options['merge-only'] || records.length > 0) {
+  // 归并这一步已经被 tools/cluster.mjs（向量聚类，35 秒、确定性）取代了：
+  // 让 LLM 去归并 800 多个标签既慢又容易 504。默认仍保留，跑批时可以 --no-merge 跳过。
+  if (!options['no-merge'] && (options['merge-only'] || records.length > 0)) {
     const mergeClient =
       client ??
       createLlmClient({
         baseUrl: options['base-url'],
         apiKey,
         model: options.model,
+        noThink: Boolean(options['no-think']),
         gate: createGate({ gapMs: options.delay, maxGapMs: 10000 }),
         log,
       });

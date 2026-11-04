@@ -21,6 +21,8 @@ import { atomicWriteJson } from '../lib/store.mjs';
 import { oneLine } from '../lib/util.mjs';
 
 const SPEC = {
+  'embed-base-url': { type: 'string', desc: '标签嵌入端点（默认沿用对话向量的端点）' },
+  'embed-model': { type: 'string', desc: '标签嵌入模型（默认沿用对话向量用的模型）' },
   k: { type: 'number', default: 0, desc: '聚成多少类（默认按标签数自适应：约每 12 个标签一类，上限 80）' },
   out: { type: 'string', default: 'memory', desc: '目录（默认 memory）' },
   'api-key': { type: 'string', desc: '嵌入端点 Key（也可用环境变量 DS_API_KEY）' },
@@ -49,10 +51,38 @@ function loadLabels(topicDir) {
 }
 
 /** k-means++ 初始化，固定种子保证可复现。 */
-function kmeans(vectors, k, iterations) {
-  const n = vectors.length;
+/**
+ * k-means（余弦距离）。
+ *
+ * 之前是朴素写法，两个地方复杂度写错了，k 一大就跑不动：
+ *   1. 初始化每加一个中心，所有点都要跟"全部已有中心"重算一遍 → O(n·k²)
+ *      实测 k=260 要 6500 万次 cosine，约 5000 亿次浮点运算
+ *   2. cosine() 每次都重算两个向量的范数，但这里的向量早就归一化了 → 白算 3 倍
+ *
+ * 现在：向量拍平成一个 Float32Array（缓存友好），归一化后点积即余弦，
+ * 初始化改成标准的增量做法（每点只维护"离最近中心的距离"）→ O(n·k)。
+ */
+function kmeans(rawVectors, k, iterations) {
+  const n = rawVectors.length;
   if (n === 0) return { assignments: [], centroids: [] };
-  const dim = vectors[0].length;
+
+  const dim = rawVectors[0].length;
+  const kk = Math.min(k, n);
+
+  // 拍平 + 归一化（点积即余弦）
+  const flat = new Float32Array(n * dim);
+  for (let i = 0; i < n; i += 1) {
+    let norm = 0;
+    for (let d = 0; d < dim; d += 1) norm += rawVectors[i][d] * rawVectors[i][d];
+    norm = Math.sqrt(norm) || 1;
+    for (let d = 0; d < dim; d += 1) flat[i * dim + d] = rawVectors[i][d] / norm;
+  }
+
+  const dotAt = (ai, bi) => {
+    let sum = 0;
+    for (let d = 0; d < dim; d += 1) sum += flat[ai + d] * flat[bi + d];
+    return sum;
+  };
 
   let seed = 20261104;
   const rand = () => {
@@ -60,37 +90,50 @@ function kmeans(vectors, k, iterations) {
     return seed / 0x7fffffff;
   };
 
-  const centroids = [vectors[Math.floor(rand() * n)].slice()];
-  while (centroids.length < Math.min(k, n)) {
-    const distances = vectors.map((v) => {
-      let best = -1;
-      for (const c of centroids) best = Math.max(best, cosine(v, c));
-      return 1 - best;
-    });
-    const total = distances.reduce((a, b) => a + b, 0) || 1;
+  // k-means++ 增量式：只跟最新加入的中心比较，O(n·k)
+  const picked = [0];
+  const best = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) best[i] = 1 - dotAt(i * dim, 0);
+
+  while (picked.length < kk) {
+    let total = 0;
+    for (let i = 0; i < n; i += 1) total += best[i];
+    if (total <= 0) break;
+
     let target = rand() * total;
-    let pick = 0;
+    let pick = n - 1;
     for (let i = 0; i < n; i += 1) {
-      target -= distances[i];
+      target -= best[i];
       if (target <= 0) {
         pick = i;
         break;
       }
     }
-    centroids.push(vectors[pick].slice());
+    picked.push(pick);
+
+    const base = pick * dim;
+    for (let i = 0; i < n; i += 1) {
+      const dist = 1 - dotAt(i * dim, base);
+      if (dist < best[i]) best[i] = dist;
+    }
   }
 
-  let assignments = new Array(n).fill(0);
+  const centroids = picked.map((index) => Float32Array.from(flat.subarray(index * dim, index * dim + dim)));
+  const assignments = new Array(n).fill(-1);
 
   for (let iter = 0; iter < iterations; iter += 1) {
     let moved = 0;
+
     for (let i = 0; i < n; i += 1) {
-      let best = -Infinity;
+      const base = i * dim;
+      let bestSim = -Infinity;
       let bestIndex = 0;
       for (let c = 0; c < centroids.length; c += 1) {
-        const sim = cosine(vectors[i], centroids[c]);
-        if (sim > best) {
-          best = sim;
+        const centroid = centroids[c];
+        let sum = 0;
+        for (let d = 0; d < dim; d += 1) sum += flat[base + d] * centroid[d];
+        if (sum > bestSim) {
+          bestSim = sum;
           bestIndex = c;
         }
       }
@@ -105,16 +148,24 @@ function kmeans(vectors, k, iterations) {
     for (let i = 0; i < n; i += 1) {
       const c = assignments[i];
       sizes[c] += 1;
-      for (let d = 0; d < dim; d += 1) sums[c][d] += vectors[i][d];
-    }
-    for (let c = 0; c < centroids.length; c += 1) {
-      if (sizes[c] === 0) continue;
-      const next = new Float64Array(dim);
-      for (let d = 0; d < dim; d += 1) next[d] = sums[c][d] / sizes[c];
-      centroids[c] = normalize(next);
+      const base = i * dim;
+      for (let d = 0; d < dim; d += 1) sums[c][d] += flat[base + d];
     }
 
-    if (moved === 0) break;
+    for (let c = 0; c < centroids.length; c += 1) {
+      if (sizes[c] === 0) continue;
+      let norm = 0;
+      for (let d = 0; d < dim; d += 1) {
+        sums[c][d] /= sizes[c];
+        norm += sums[c][d] * sums[c][d];
+      }
+      norm = Math.sqrt(norm) || 1;
+      for (let d = 0; d < dim; d += 1) sums[c][d] /= norm;
+      centroids[c] = sums[c];
+    }
+
+    // 收敛就提前停：变动少于 0.1%
+    if (moved / n < 0.001) break;
   }
 
   return { assignments, centroids };
@@ -144,13 +195,18 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   const conversationCache = JSON.parse(fs.readFileSync(vectorFile, 'utf8'));
-  const { baseUrl, model } = conversationCache;
+
+  // 标签向量和对话向量是两个独立的空间，不必用同一个嵌入模型：
+  // 对话向量决定搜索/星座图，标签向量只用于把标签聚成主题。
+  // 所以 --embed-base-url / --embed-model 可以单独指定（比如对话用远程 8b、标签用本地 4b）。
+  const baseUrl = options['embed-base-url'] || conversationCache.baseUrl;
+  const model = options['embed-model'] || conversationCache.model;
 
   // 固定的 k 是之前的问题：840 个标签塞进 30 类，每类 28 个，必然混进不相干的东西。
   // 默认按标签数量估算，每 12 个标签一类，夹在 15-80 之间。
   const k = options.k > 0 ? options.k : Math.min(80, Math.max(15, Math.round(labels.length / 12)));
   log(`标签：${labels.length} 种，目标 ${k} 类${options.k > 0 ? '（手动指定）' : '（按标签数自适应）'}`);
-  log(`嵌入端点：${model} @ ${baseUrl}`);
+  log(`标签嵌入端点：${model} @ ${baseUrl}${options['embed-model'] ? '（手动指定）' : ''}`);
 
   // 标签向量单独缓存：换 k 不必重新嵌入
   let cache = null;
@@ -167,24 +223,53 @@ export async function main(argv = process.argv.slice(2)) {
   const missing = labels.filter((item) => !existing[item.label]);
 
   if (missing.length) {
-    if (!apiKey) {
+    // 本地端点（LM Studio / Ollama）不需要 Key
+    const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(baseUrl);
+    if (!apiKey && !isLocal) {
       log('! 需要 API Key 来嵌入标签：--api-key 或 DS_API_KEY');
       return 1;
     }
-    const client = createEmbeddingClient({ baseUrl, apiKey, model, batchSize: 32 });
+
+    const client = createEmbeddingClient({ baseUrl, apiKey, model, batchSize: 16 });
     log(`正在嵌入 ${missing.length} 个标签…`);
-    const vectors = await client.embed(missing.map((item) => item.label));
-    vectors.forEach((vector, i) => {
-      existing[missing[i].label] = encodeVector(normalize(vector));
-    });
-    atomicWriteJson(labelFile, {
-      schema: 1,
-      model,
-      baseUrl,
-      dim: vectors[0]?.length ?? 0,
-      createdAt: new Date().toISOString(),
-      items: existing,
-    });
+
+    // 分批嵌入并且每批落盘：1940 个标签要跑几十个请求，中途被 429 打断时
+    // 已完成的批次不能白费（之前一次性提交，失败就全丢）。
+    const CHUNK = 64;
+    let done = 0;
+    for (let start = 0; start < missing.length; start += CHUNK) {
+      const slice = missing.slice(start, start + CHUNK);
+
+      // 限流时指数退避重试，最多 6 次
+      let vectors = null;
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        try {
+          vectors = await client.embed(slice.map((item) => item.label));
+          break;
+        } catch (error) {
+          const retriable = /429|rate|too many|限流|timeout|ECONN|fetch failed/i.test(error.message);
+          if (!retriable || attempt === 5) throw error;
+          const wait = Math.min(30000, 1500 * 2 ** attempt);
+          log(`  · 限流/网络错误，${Math.round(wait / 1000)}s 后重试（第 ${attempt + 1} 次）`);
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        }
+      }
+
+      vectors.forEach((vector, i) => {
+        existing[slice[i].label] = encodeVector(normalize(vector));
+      });
+      done += slice.length;
+
+      atomicWriteJson(labelFile, {
+        schema: 1,
+        model,
+        baseUrl,
+        dim: vectors[0]?.length ?? 0,
+        createdAt: new Date().toISOString(),
+        items: existing,
+      });
+      log(`  · ${done}/${missing.length}`);
+    }
   } else {
     log('标签向量已缓存，跳过嵌入');
   }

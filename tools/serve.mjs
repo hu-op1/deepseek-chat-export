@@ -24,7 +24,7 @@ import { renderAtlasHtml } from '../lib/atlas-html.mjs';
 import { renderGraphHtml } from '../lib/graph-html.mjs';
 import { loadIndex } from '../lib/store.mjs';
 import { firstUserText, monthOf, sessionMessages } from '../lib/topics.mjs';
-import { layout, renderChat, renderError, renderOverview, renderSearch, renderTasks } from '../lib/web.mjs';
+import { layout, renderChat, renderError, renderOverview, renderSearch, renderTasks, renderTimeline } from '../lib/web.mjs';
 import { TASKS, executeTask } from '../lib/tasks.mjs';
 import { loadConfig, resolveRuntime, saveConfig } from '../lib/config.mjs';
 import { oneLine } from '../lib/util.mjs';
@@ -83,8 +83,9 @@ export function main(argv = process.argv.slice(2)) {
   // 端点和 Key 的优先级：命令行 > 环境变量 > memory/config.json（网页上保存的）
   const runtime = resolveRuntime({ outDir, flagBaseUrl: options['base-url'], flagApiKey: options['api-key'] });
 
-  const currentBaseUrl = () => runtime.baseUrl || getVectors()?.baseUrl || '';
-  const currentKey = () => runtime.apiKey || runtime.config.apiKey || '';
+  // 两套端点：嵌入用于搜索/向量，对话用于标注
+  const embedNet = () => ({ baseUrl: runtime.embed.baseUrl || getVectors()?.baseUrl || '', apiKey: runtime.embed.apiKey });
+  const chatNet = () => ({ baseUrl: runtime.chat.baseUrl, apiKey: runtime.chat.apiKey });
 
   // 全部按需加载并缓存：启动时不读 10MB 向量文件
   const cache = { index: null, vectors: null, atlas: null, graph: null };
@@ -122,7 +123,7 @@ export function main(argv = process.argv.slice(2)) {
     if (!vectors) {
       return { hits: [], error: '还没有向量缓存。先运行：node tools/embed.mjs --base-url … --model …' };
     }
-    const key = currentKey();
+    const key = embedNet().apiKey;
     if (!key) {
       return { hits: [], error: '服务端没有 API Key，无法把查询词嵌入。重启时加上 --api-key 或设置 DS_API_KEY。' };
     }
@@ -137,6 +138,7 @@ export function main(argv = process.argv.slice(2)) {
       .filter((item) => item.vector.length > 0);
 
     const index = getIndex();
+    const notes = conversationNotes();
     const hits = nearest(target, items, top).map((hit) => {
       const entry = index.sessions[hit.id];
       let snippet = '';
@@ -157,6 +159,8 @@ export function main(argv = process.argv.slice(2)) {
         title: entry?.title ?? hit.item?.title ?? '',
         month: monthOfValue(entry?.updated_at) ?? hit.item?.month ?? '',
         snippet,
+        summary: notes.get(hit.id)?.summary ?? '',
+        topics: topicLabelsOf(notes.get(hit.id)?.topics),
         messageCount,
       };
     });
@@ -164,9 +168,36 @@ export function main(argv = process.argv.slice(2)) {
     return { hits, model: vectors.model };
   }
 
+  /** 每段对话的标注（摘要、主题、实体），来自 graph.json；没有就返回空表。 */
+  function conversationNotes() {
+    const graph = getGraph();
+    const map = new Map();
+    if (!graph?.conversations) return map;
+    for (const [id, info] of Object.entries(graph.conversations)) map.set(id, info);
+    return map;
+  }
+
+  /** 主题 id → 可读名字。 */
+  function topicLabelsOf(ids, limit = 4) {
+    if (!Array.isArray(ids) || !ids.length) return [];
+    const graph = getGraph();
+    if (!graph?.topics) return [];
+    const byId = new Map(graph.topics.map((t) => [t.id, t.label]));
+    return ids
+      .map((id) => byId.get(id))
+      .filter(Boolean)
+      .slice(0, limit);
+  }
+
+  // 首页统计要遍历 48MB 会话文件，不能每次刷新都算一遍
+  const heavyCache = { key: null, value: null };
+
   function overviewStats() {
     const index = getIndex();
     const entries = Object.values(index.sessions);
+    const graphForCache = getGraph();
+    const cacheKey = `${index.updatedAt ?? ''}|${entries.length}|${graphForCache?.generatedAt ?? ''}`;
+    if (heavyCache.key === cacheKey) return heavyCache.value;
     const times = entries.map((e) => Number(e.updated_at)).filter((n) => Number.isFinite(n) && n > 0);
     const toMs = (v) => (v > 1e11 ? v : v * 1000);
 
@@ -194,8 +225,31 @@ export function main(argv = process.argv.slice(2)) {
 
     const months = Object.keys(countsByMonth).sort();
     const vectors = getVectors();
+    const graph = getGraph();
+    const notes = conversationNotes();
 
-    return {
+    // 最近 8 段：首页最有用的东西其实是"我最近在聊什么"
+    // 注意 id 是 index.sessions 的键，条目本身没有 id 字段
+    const recent = Object.entries(index.sessions)
+      .filter(([, e]) => e.file)
+      .sort((a, b) => toMs(Number(b[1].updated_at)) - toMs(Number(a[1].updated_at)))
+      .slice(0, 8)
+      .map(([id, e]) => ({
+        id,
+        title: e.title || '(无标题)',
+        month: monthOfValue(e.updated_at) ?? '',
+        summary: notes.get(id)?.summary ?? '',
+        topics: topicLabelsOf(notes.get(id)?.topics, 3),
+      }));
+
+    // 聊得最多的主题
+    const topTopics = (graph?.topics ?? [])
+      .slice()
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 12)
+      .map((t) => ({ id: t.id, label: t.label, count: t.count }));
+
+    const result = {
       stats: {
         conversations: entries.length,
         messages,
@@ -205,9 +259,13 @@ export function main(argv = process.argv.slice(2)) {
           : '无时间数据',
         vectors: vectors ? Object.keys(vectors.items).length : 0,
         vectorLabel: vectors ? `${vectors.dim} 维 · ${vectors.model}` : '尚未生成',
+        topics: graph?.counts?.topics ?? 0,
+        annotated: notes.size,
       },
       months,
       countsByMonth,
+      recent,
+      topTopics,
       artifacts: {
         '备份数据': { ok: fs.existsSync(path.join(dataDir, 'index.json')), label: `${entries.length} 段` },
         '向量缓存': { ok: Boolean(vectors), label: vectors ? `${Object.keys(vectors.items).length} 条` : '缺失' },
@@ -221,6 +279,10 @@ export function main(argv = process.argv.slice(2)) {
         },
       },
     };
+
+    heavyCache.key = cacheKey;
+    heavyCache.value = result;
+    return result;
   }
 
   const server = http.createServer(async (req, res) => {
@@ -235,6 +297,40 @@ export function main(argv = process.argv.slice(2)) {
       if (url.pathname === '/') {
         const overview = overviewStats();
         return page(layout({ title: '对话档案', active: 'home', body: renderOverview(overview) }));
+      }
+
+      if (url.pathname === '/timeline') {
+        const graph = getGraph();
+        if (!graph?.conversations) {
+          return page(layout({ title: '时间线', active: 'timeline', body: renderTimeline({ months: [] }) }));
+        }
+
+        const topicLabel = new Map((graph.topics ?? []).map((t) => [t.id, t.label]));
+        const byMonth = new Map();
+
+        for (const [id, info] of Object.entries(graph.conversations)) {
+          const month = info.month;
+          if (!month) continue;
+          if (!byMonth.has(month)) byMonth.set(month, { month, total: 0, topicCount: new Map(), items: [] });
+          const bucket = byMonth.get(month);
+          bucket.total += 1;
+          for (const tid of info.topics ?? []) bucket.topicCount.set(tid, (bucket.topicCount.get(tid) ?? 0) + 1);
+          bucket.items.push({ id, title: info.title, summary: info.summary });
+        }
+
+        const months = [...byMonth.values()]
+          .sort((a, b) => (a.month < b.month ? 1 : -1))
+          .map((bucket) => ({
+            month: bucket.month,
+            total: bucket.total,
+            topics: [...bucket.topicCount.entries()]
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 6)
+              .map(([tid, count]) => ({ label: topicLabel.get(tid) ?? tid, count })),
+            items: bucket.items.slice(0, 6),
+          }));
+
+        return page(layout({ title: '时间线', active: 'timeline', body: renderTimeline({ months }) }));
       }
 
       if (url.pathname === '/search') {
@@ -282,7 +378,19 @@ export function main(argv = process.argv.slice(2)) {
           title: atlas.points.find((p) => p.id === n.id)?.t ?? '',
         }));
 
-        return page(layout({ title: entry.title ?? '对话', body: renderChat({ entry, session, neighbors }) }));
+        const note = conversationNotes().get(id);
+        return page(
+          layout({
+            title: entry.title ?? '对话',
+            body: renderChat({
+              entry,
+              session,
+              neighbors,
+              summary: note?.summary ?? '',
+              topics: topicLabelsOf(note?.topics, 5),
+            }),
+          }),
+        );
       }
 
       if (url.pathname === '/atlas') {
@@ -306,16 +414,19 @@ export function main(argv = process.argv.slice(2)) {
 
       if (url.pathname === '/tasks') {
         const vectors = getVectors();
-        const baseUrl = currentBaseUrl();
+        const embed = embedNet();
+        const chat = chatNet();
         return page(
           layout({
             title: '任务',
             active: 'tasks',
             body: renderTasks({
               tasks: TASKS,
-              endpoint: baseUrl ? `${vectors?.model ?? ''} @ ${baseUrl}`.trim() : '',
-              hasKey: Boolean(currentKey()),
-              config: { ...runtime.config, baseUrl },
+              endpoints: {
+                chat: { baseUrl: chat.baseUrl, hasKey: Boolean(chat.apiKey), model: runtime.config.chatModel },
+                embed: { baseUrl: embed.baseUrl, hasKey: Boolean(embed.apiKey), model: vectors?.model ?? runtime.config.embedModel },
+              },
+              config: { ...runtime.config, embedBaseUrl: embed.baseUrl },
             }),
           }),
         );
@@ -323,9 +434,17 @@ export function main(argv = process.argv.slice(2)) {
 
       if (url.pathname === '/api/config') {
         if (req.method === 'GET') {
+          const embed = embedNet();
+          const chat = chatNet();
           return send(
             200,
-            JSON.stringify({ ...runtime.config, apiKey: currentKey() ? '已保存' : '', baseUrl: currentBaseUrl() }),
+            JSON.stringify({
+              ...runtime.config,
+              chatBaseUrl: chat.baseUrl,
+              embedBaseUrl: embed.baseUrl,
+              chatApiKey: chat.apiKey ? '已保存' : '',
+              embedApiKey: embed.apiKey ? '已保存' : '',
+            }),
             'application/json; charset=utf-8',
           );
         }
@@ -340,23 +459,27 @@ export function main(argv = process.argv.slice(2)) {
 
           // Key 留空表示"不修改"，避免每次保存都把已存的 Key 冲掉
           const patch = { ...payload };
+          if (!String(patch.chatApiKey ?? '').trim()) delete patch.chatApiKey;
+          if (!String(patch.embedApiKey ?? '').trim()) delete patch.embedApiKey;
           if (!String(patch.apiKey ?? '').trim()) delete patch.apiKey;
 
           const saved = saveConfig(outDir, patch);
           runtime.config = saved;
-          if (saved.baseUrl) runtime.baseUrl = saved.baseUrl;
-          if (saved.apiKey) runtime.apiKey = saved.apiKey;
+          // 配置改了就重新解析一次运行时端点
+          Object.assign(runtime, resolveRuntime({ outDir, flagBaseUrl: options['base-url'], flagApiKey: options['api-key'] }));
 
-          return send(200, JSON.stringify({ ok: true, baseUrl: saved.baseUrl }), 'application/json; charset=utf-8');
+          return send(200, JSON.stringify({ ok: true }), 'application/json; charset=utf-8');
         }
       }
 
       if (url.pathname === '/api/models') {
-        const baseUrl = currentBaseUrl();
+        const which = url.searchParams.get('which') === 'chat' ? 'chat' : 'embed';
+        const net = which === 'chat' ? chatNet() : embedNet();
+        const baseUrl = net.baseUrl;
         if (!baseUrl) {
-          return send(400, JSON.stringify({ error: '先填端点地址' }), 'application/json; charset=utf-8');
+          return send(400, JSON.stringify({ error: `先填${which === 'chat' ? '对话' : '嵌入'}端点地址` }), 'application/json; charset=utf-8');
         }
-        const key = currentKey();
+        const key = net.apiKey;
         try {
           const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/models`, {
             headers: key ? { authorization: `Bearer ${key}` } : {},
@@ -397,7 +520,7 @@ export function main(argv = process.argv.slice(2)) {
             return send(400, JSON.stringify({ error: `没有这个任务：${payload?.name}` }), 'application/json; charset=utf-8');
           }
 
-          const env = { baseUrl: currentBaseUrl(), apiKey: currentKey() };
+          const env = { chat: chatNet(), embed: embedNet() };
 
           // 先把状态占住再回 202：否则"响应已发出、任务还没开始"这条缝里，
           // 第二个请求会看到 running=false 而溜进来。
@@ -437,7 +560,9 @@ export function main(argv = process.argv.slice(2)) {
             ok: true,
             conversations: Object.keys(getIndex().sessions).length,
             vectors: vectors ? Object.keys(vectors.items).length : 0,
-            hasKey: Boolean(currentKey()),
+            hasKey: Boolean(embedNet().apiKey),
+            chatEndpoint: chatNet().baseUrl || null,
+            embedEndpoint: embedNet().baseUrl || null,
           }),
           'application/json; charset=utf-8',
         );
@@ -456,7 +581,10 @@ export function main(argv = process.argv.slice(2)) {
     log('');
     log(`对话档案 → ${target}`);
     log(`数据 ${dataDir} · 向量 ${outDir}`);
-    log(currentKey() ? '语义搜索：可用（Key 已加载）' : '语义搜索：缺少 Key，去网页「任务」页填端点设置');
+    const embed = embedNet();
+    const chat = chatNet();
+    log('嵌入端点：' + (embed.baseUrl || '未配置') + (embed.apiKey ? '（Key 已加载）' : '（缺少 Key）'));
+    log('对话端点：' + (chat.baseUrl || '未配置') + (chat.apiKey ? '（Key 已加载）' : '（无 Key）'));
     log('只监听 127.0.0.1，按 Ctrl+C 停止');
     log('');
     if (options.open) execFile('cmd', ['/c', 'start', '', target], () => {});

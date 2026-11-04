@@ -73,8 +73,8 @@ test('一直烧光预算时，报错要说明是推理吃掉了，而不是"模�
     },
   );
 
-  // 4000 → 8000 → 16000 后放弃
-  assert.deepEqual(server.state.budgets, [4000, 8000, 16000]);
+  // 4000 → 8000 → 16000 → 32000 后放弃（上限随小模型一起提到 32000）
+  assert.deepEqual(server.state.budgets, [4000, 8000, 16000, 32000]);
 });
 
 test('空内容但不是 length 截断时，直接报错不重试', async (t) => {
