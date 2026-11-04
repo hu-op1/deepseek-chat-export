@@ -115,6 +115,18 @@ node tools/graph.mjs --open
 
 API Key 用 `--api-key` 传，或者放环境变量 `DS_API_KEY`。
 
+**如果用的是推理模型**（deepseek-flash、glm-5.3-flash 这类），它会把输出预算先花在思考上。
+预算给小了就会出现"模型返回了空内容"——其实是 `finish_reason=length`，正文还没开始就被截断。
+脚本会自动翻倍重试（最多三次），但更快的做法是直接给够：
+
+```powershell
+node tools/topics.mjs --base-url … --model … --max-tokens 2500
+```
+
+实测：预算 700 时每 3-4 个请求就要重试一次，提到 2500 后标注速度从 9.5 个/分钟涨到 15.5 个/分钟。
+另外并发不要开太大——这个端点用 6 并发 + 1 秒间隔稳定，再高会开始回 429。
+
+
 产出：
 
 ```
@@ -204,7 +216,7 @@ node tools/atlas.mjs --open
 ## 开发
 
 ```powershell
-node --test        # 75 个测试，全部不依赖外网
+node --test        # 109 个测试，全部不依赖外网
 ```
 
 测试里有本地假服务器：一个模拟 DeepSeek 的备份接口，一个模拟 OpenAI 兼容的模型端点，

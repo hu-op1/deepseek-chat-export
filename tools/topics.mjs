@@ -39,6 +39,7 @@ const SPEC = {
   'merge-only': { type: 'boolean', desc: '只重跑归并步骤' },
   'max-chars': { type: 'number', default: 6000, desc: '每个对话送进模型的字符上限' },
   grain: { type: 'number', default: 30, desc: '归并后的主题数量（默认 30）' },
+  'max-tokens': { type: 'number', default: 2500, desc: '单次标注的输出上限（推理模型要给够，否则会触发重试）' },
   concurrency: { type: 'number', default: 3, desc: '并发数（默认 3）' },
   delay: { type: 'number', default: 400, desc: '请求最小间隔毫秒（默认 400）' },
   'dry-run': { type: 'boolean', desc: '只打印将要标注的清单，不调用模型' },
@@ -223,7 +224,7 @@ async function main() {
         const { data, usage } = await client.json({
           system: ANNOTATION_SYSTEM,
           user: annotationPrompt({ title: entry.title, month, snippet: text, truncated }),
-          maxTokens: 700,
+          maxTokens: options['max-tokens'],
           temperature: 0,
         });
 
