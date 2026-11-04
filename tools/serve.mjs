@@ -19,7 +19,7 @@ import { execFile } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 import { parseArgs, usage } from '../lib/args.mjs';
-import { createEmbeddingClient, decodeVector, nearest, normalize } from '../lib/embed.mjs';
+import { createEmbeddingClient, decodeVector, nearest, normalize, withQueryInstruction } from '../lib/embed.mjs';
 import { renderAtlasHtml } from '../lib/atlas-html.mjs';
 import { renderGraphHtml } from '../lib/graph-html.mjs';
 import { loadIndex } from '../lib/store.mjs';
@@ -121,10 +121,37 @@ export function main(argv = process.argv.slice(2)) {
   const getVectors = () => jsonCache(path.join(outDir, 'vectors.json'), 'vectors');
   const getAtlas = () => jsonCache(path.join(outDir, 'atlas.json'), 'atlas');
   const getAtlas3d = () => jsonCache(path.join(outDir, 'atlas3d.json'), 'atlas3d');
+  const getChunks = () => jsonCache(path.join(outDir, 'chunks.json'), 'chunks');
   const getGraph = () => jsonCache(path.join(outDir, 'graph.json'), 'graph');
 
   const readSession = (entry) => JSON.parse(fs.readFileSync(path.join(dataDir, entry.file), 'utf8'));
 
+  // 分段向量解码一次就够：2840 段 × 2560 维，每次查询都重新解码要 5 秒。
+  const chunkCache = { key: null, list: [] };
+  function chunkVectors() {
+    const store = getChunks();
+    if (!store?.items) return [];
+    const key = `${store.createdAt ?? ''}|${store.model ?? ''}`;
+    if (chunkCache.key === key) return chunkCache.list;
+
+    const list = [];
+    for (const [id, record] of Object.entries(store.items)) {
+      for (const chunk of record.chunks ?? []) {
+        const vector = decodeVector(chunk.v);
+        if (!vector.length) continue;
+        list.push({ id, index: chunk.i, from: chunk.from, to: chunk.to, excerpt: chunk.excerpt, vector });
+      }
+    }
+    chunkCache.key = key;
+    chunkCache.list = list;
+    return list;
+  }
+  /** 两边都已归一化时，点积就是余弦——搜索里要算几千次，省掉重复求模。 */
+  const dotSimilarity = (a, b) => {
+    let sum = 0;
+    for (let i = 0; i < a.length; i += 1) sum += a[i] * b[i];
+    return sum;
+  };
   /** 把查询词嵌入成向量，再和全部对话算余弦。 */
   async function semanticSearch(query, top = 12) {
     const vectors = getVectors();
@@ -137,7 +164,8 @@ export function main(argv = process.argv.slice(2)) {
     }
 
     const client = createEmbeddingClient({ baseUrl: vectors.baseUrl, apiKey: key, model: vectors.model });
-    const [raw] = await client.embed([query]);
+    // 查询侧加指令前缀（非对称检索，文档侧不加）
+    const [raw] = await client.embed([withQueryInstruction(query)]);
     if (!raw) return { hits: [], error: '嵌入端点没有返回向量。' };
 
     const target = normalize(raw);
@@ -145,10 +173,31 @@ export function main(argv = process.argv.slice(2)) {
       .map(([id, item]) => ({ id, vector: decodeVector(item.v), title: item.t, month: item.m }))
       .filter((item) => item.vector.length > 0);
 
+    // 分段向量：长对话切成很多段，每段一个向量。
+    // 整段向量只覆盖了前 1000 字（27 万字的对话是 1.5%），查询经常落空；
+    // 这里对每段单独打分，取该对话里最像的那一段。
+    const bestChunk = new Map();
+    for (const chunk of chunkVectors()) {
+      const score = dotSimilarity(target, chunk.vector);
+      const previous = bestChunk.get(chunk.id);
+      if (!previous || score > previous.score) {
+        bestChunk.set(chunk.id, { score, index: chunk.index, from: chunk.from, to: chunk.to, excerpt: chunk.excerpt });
+      }
+    }
+
     const index = getIndex();
     const notes = conversationNotes();
-    const hits = nearest(target, items, top).map((hit) => {
-      const entry = index.sessions[hit.id];
+
+    // 整段分与最像片段分取较大的那个：短对话没有分段，只看整段
+    const merged = items.map((item) => {
+      const chunk = bestChunk.get(item.id);
+      return { item, score: chunk && chunk.score > dotSimilarity(target, item.vector) ? chunk.score : dotSimilarity(target, item.vector), chunk };
+    });
+    merged.sort((a, b) => b.score - a.score);
+
+    const hits = merged.slice(0, top).map(({ item: hit, score, chunk }) => {
+      const id = hit.id;
+      const entry = index.sessions[id];
       let snippet = '';
       let messageCount = 0;
       if (entry?.file) {
@@ -162,11 +211,12 @@ export function main(argv = process.argv.slice(2)) {
       }
       // 标题和月份从索引里取（最权威）；缓存里的 t/m 只当兜底
       return {
-        id: hit.id,
-        score: hit.score,
-        title: entry?.title ?? hit.item?.title ?? '',
-        month: monthOfValue(entry?.updated_at) ?? hit.item?.month ?? '',
+        id,
+        score,
+        title: entry?.title ?? hit.title ?? '',
+        month: monthOfValue(entry?.updated_at) ?? hit.month ?? '',
         snippet,
+        chunk: chunk ?? null,
         date: entry?.updated_at ?? null,
         summary: notes.get(hit.id)?.summary ?? '',
         topics: topicLabelsOf(notes.get(hit.id)?.topics),
@@ -176,6 +226,7 @@ export function main(argv = process.argv.slice(2)) {
 
     return { hits, model: vectors.model };
   }
+
 
   /** 每段对话的标注（摘要、主题、实体），来自 graph.json；没有就返回空表。 */
   function conversationNotes() {

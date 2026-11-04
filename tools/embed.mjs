@@ -149,8 +149,10 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   const dim = vectors[0]?.length ?? 0;
-  if (cache && cache.dim && dim && cache.dim !== dim) {
+  // --force 就是"整体重算"，旧缓存的维度不该再拦人（换模型时维度必然变）
+  if (cache && !options.force && cache.dim && dim && cache.dim !== dim) {
     log(`! 端点返回的维度是 ${dim}，与缓存里的 ${cache.dim} 不一致，无法混用。`);
+    log('  换模型请加 --force 全部重算。');
     return 1;
   }
 

@@ -15,7 +15,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { parseArgs, usage } from '../lib/args.mjs';
-import { createEmbeddingClient, decodeVector, nearest, normalize } from '../lib/embed.mjs';
+import { createEmbeddingClient, decodeVector, nearest, normalize, withQueryInstruction } from '../lib/embed.mjs';
 import { loadIndex } from '../lib/store.mjs';
 import { firstUserText, sessionMessages } from '../lib/topics.mjs';
 import { clip, oneLine } from '../lib/util.mjs';
@@ -102,7 +102,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
 
     const client = createEmbeddingClient({ baseUrl: cache.baseUrl, apiKey, model: cache.model });
-    const [vector] = await client.embed([query]);
+    const [vector] = await client.embed([withQueryInstruction(query)]);
     if (!vector) {
       log('! 嵌入查询失败');
       return 1;

@@ -50,11 +50,31 @@ const session = {
   ],
 };
 
-test('sessionMessages：正文从 fragments 里拼出来', () => {
+test('sessionMessages：只取提问和最终回答，不含思考与工具片段', () => {
   const messages = sessionMessages(session);
   assert.equal(messages.length, 4);
-  assert.equal(messages[1].text, '这是空指针\n先判断是不是 null');
   assert.equal(messages[0].role, 'USER');
+  // THINK 是模型的草稿纸，不该进标注和嵌入的输入
+  assert.equal(messages[1].text, '这是空指针');
+  assert.doesNotMatch(messages[1].text, /先判断是不是 null/);
+});
+
+test('sessionMessages：整段只有思考时，这条消息不产生条目', () => {
+  const thinkingOnly = {
+    messages: [
+      { role: 'USER', fragments: [{ type: 'REQUEST', content: '在吗' }] },
+      {
+        role: 'ASSISTANT',
+        fragments: [
+          { type: 'THINK', content: '我需要搜索一下' },
+          { type: 'TOOL_SEARCH', content: 'Found 3 web pages' },
+        ],
+      },
+    ],
+  };
+  const messages = sessionMessages(thinkingOnly);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].text, '在吗');
 });
 
 test('sessionMessages：空对话不产生垃圾条目', () => {
