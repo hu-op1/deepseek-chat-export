@@ -425,11 +425,16 @@ export function main(argv = process.argv.slice(2)) {
 
         const session = readSession(entry);
         const atlas = getAtlas();
-        const neighbors = (atlas?.neighbors?.[id] ?? []).slice(0, 5).map((n) => ({
-          id: n.id,
-          score: n.score,
-          title: atlas.points.find((p) => p.id === n.id)?.t ?? '',
-        }));
+        // 相似度不到 40% 的不叫"相近"：全库最近邻的 p25 是 41.8%，
+        // 低于这个数的只是排序上的第 4、5 名，硬列出来会误导。
+        const neighbors = (atlas?.neighbors?.[id] ?? [])
+          .filter((n) => n.score >= 0.4)
+          .slice(0, 5)
+          .map((n) => ({
+            id: n.id,
+            score: n.score,
+            title: atlas.points.find((p) => p.id === n.id)?.t ?? '',
+          }));
 
         const note = conversationNotes().get(id);
         return page(
