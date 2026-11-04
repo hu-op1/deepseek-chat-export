@@ -40,6 +40,7 @@ const SPEC = {
   'redo-stale': { type: 'boolean', desc: '重标那些上次用了更小 --max-chars 的对话（额度变大后补跑用）' },
   'merge-only': { type: 'boolean', desc: '只重跑归并步骤' },
   'no-merge': { type: 'boolean', desc: '跳过 LLM 归并（改用 tools/cluster.mjs 做向量聚类）' },
+  seal: { type: 'boolean', desc: '把当前内容指纹写进已有标注记录，不调用模型（升级后补一次）' },
   'max-chars': { type: 'number', default: 1000000, desc: '每个对话送进模型的字符上限（默认不限；超出模型上下文时会自动减半重试）' },
   grain: { type: 'number', default: 30, desc: '归并后的主题数量（默认 30）' },
   'max-tokens': { type: 'number', default: 8000, desc: '单次标注的输出上限（推理模型要给够，否则会触发重试）' },
@@ -233,6 +234,29 @@ export async function main(argv = process.argv.slice(2)) {
   };
 
   const budget = options['max-chars'];
+
+  // --seal：把当前的内容指纹写进已有标注记录，不调用模型。
+  // 用途：升级到"内容变了才重标"之前标的那些记录没有 contentHash，
+  // 不盖章的话下次会全部被判成"内容有变"，白跑一轮 token。
+  if (options.seal) {
+    let sealed = 0;
+    for (const entry of all) {
+      const file = recordPath(entry.id);
+      if (!fs.existsSync(file) || !entry.content_hash) continue;
+      try {
+        const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (record?.meta?.contentHash === entry.content_hash) continue;
+        record.meta = { ...(record.meta ?? {}), contentHash: entry.content_hash };
+        atomicWriteJson(file, record);
+        sealed += 1;
+      } catch {
+        /* 单条坏记录跳过 */
+      }
+    }
+    log(`已为 ${sealed} 条标注记录盖上当前内容指纹（未调用模型）`);
+    return 0;
+  }
+
   const isStale = (entry) => {
     if (!fs.existsSync(recordPath(entry.id))) return false;
     const meta = readMeta(entry.id);
@@ -241,13 +265,34 @@ export async function main(argv = process.argv.slice(2)) {
     return usedBudget < budget;
   };
 
+  /**
+   * 对话在网页端又聊了新内容 → 本地 JSON 被增量更新 → 旧标注就过期了。
+   * 判断依据是 export 写进索引的 content_hash；老记录没存这个字段，按"内容有变"处理。
+   */
+  const isContentChanged = (entry) => {
+    if (!fs.existsSync(recordPath(entry.id))) return false;
+    if (!entry.content_hash) return false;
+    const meta = readMeta(entry.id);
+    if (!meta) return true;
+    if (!meta.contentHash) return true; // 上一版标注没记 hash，无法判断，重标一次
+    return meta.contentHash !== entry.content_hash;
+  };
+
+  // 默认：没标过的标；已有标注的跳过。
+  // 但只要对话内容变了，就重标——否则摘要和主题会一直停留在旧内容上。
   const needsAnnotate = options.force
     ? all
     : all.filter(
         (entry) =>
-          !fs.existsSync(recordPath(entry.id)) || (options['redo-stale'] && isStale(entry)),
+          !fs.existsSync(recordPath(entry.id)) ||
+          isContentChanged(entry) ||
+          (options['redo-stale'] && isStale(entry)),
       );
 
+  if (!options.force) {
+    const changed = all.filter(isContentChanged).length;
+    if (changed) log(`内容有更新（对话又聊了新内容）：${changed} 个，会重标`);
+  }
   if (!options.force && options['redo-stale']) {
     const stale = all.filter(isStale).length;
     log(`--redo-stale：发现 ${stale} 个是用更小预算标的，会重标`);
@@ -339,6 +384,7 @@ export async function main(argv = process.argv.slice(2)) {
             fullChars,
             chars, // 实际送入的字符数
             maxChars: budget, // 当时配置的预算，--redo-stale 靠它判断要不要重标
+            contentHash: entry.content_hash ?? null, // 内容变了就重标
             truncated,
             tokens: usage?.total_tokens ?? null,
           },
