@@ -25,6 +25,7 @@ import { renderGraphHtml } from '../lib/graph-html.mjs';
 import { loadIndex } from '../lib/store.mjs';
 import { firstUserText, monthOf, sessionMessages } from '../lib/topics.mjs';
 import { layout, renderChat, renderChatList, renderError, renderOverview, renderSearch, renderTasks, renderTimeline } from '../lib/web.mjs';
+import { renderAtlas3dHtml } from '../lib/atlas3d-html.mjs';
 import { TASKS, executeTask } from '../lib/tasks.mjs';
 import { loadConfig, resolveRuntime, saveConfig } from '../lib/config.mjs';
 import { oneLine } from '../lib/util.mjs';
@@ -41,6 +42,12 @@ const SPEC = {
 
 const NAV_HTML = `<nav class="top" style="border-bottom:2px solid #1B1F24;margin:0 -22px 26px;padding:14px 22px 0;display:flex;gap:22px;align-items:baseline;flex-wrap:wrap;font-family:var(--mono,monospace);font-size:12px">
 <a href="/" style="text-decoration:none;color:#5A6470">← 返回档案</a></nav>`;
+
+// 二维/三维两个星座图互相加个跳转
+const navWithLink = (href, label) =>
+  NAV_HTML.replace('</nav>', `<a href="${href}" style="text-decoration:none;color:#5A6470">${label}</a></nav>`);
+const NAV_HTML_ATLAS = navWithLink('/atlas3d', '3D 版本 →');
+const NAV_HTML_3D = navWithLink('/atlas', '二维版本 →');
 
 const log = (m = '') => console.log(m);
 
@@ -113,6 +120,7 @@ export function main(argv = process.argv.slice(2)) {
   const getIndex = () => jsonCache(path.join(dataDir, 'index.json'), 'index') || loadIndex(dataDir);
   const getVectors = () => jsonCache(path.join(outDir, 'vectors.json'), 'vectors');
   const getAtlas = () => jsonCache(path.join(outDir, 'atlas.json'), 'atlas');
+  const getAtlas3d = () => jsonCache(path.join(outDir, 'atlas3d.json'), 'atlas3d');
   const getGraph = () => jsonCache(path.join(outDir, 'graph.json'), 'graph');
 
   const readSession = (entry) => JSON.parse(fs.readFileSync(path.join(dataDir, entry.file), 'utf8'));
@@ -441,7 +449,25 @@ export function main(argv = process.argv.slice(2)) {
       if (url.pathname === '/atlas') {
         const atlas = getAtlas();
         if (!atlas) return page(layout({ title: '星座图', active: 'atlas', body: renderError({ message: '还没有星座图，先运行 node tools/atlas.mjs' }) }), 404);
-        return page(renderAtlasHtml(atlas, { title: '对话星座图', nav: NAV_HTML }));
+        return page(renderAtlasHtml(atlas, { title: '对话星座图', nav: NAV_HTML_ATLAS }));
+      }
+
+      if (url.pathname === '/atlas3d') {
+        const atlas3d = getAtlas3d();
+        if (!atlas3d) {
+          return page(
+            layout({
+              title: '3D 星座图',
+              active: 'atlas3d',
+              body: renderError({
+                message: '还没有三维星座图数据',
+                hint: '运行 node tools/atlas3d.mjs，或在「任务」页点「生成 3D 星座图」',
+              }),
+            }),
+            404,
+          );
+        }
+        return page(renderAtlas3dHtml({ title: '对话星座图 3D', nav: NAV_HTML_3D, atlas: atlas3d }));
       }
 
       if (url.pathname === '/topics') {
