@@ -90,25 +90,73 @@ async function runMerge({ client, records, outDir, grain }) {
 
   log(`\n正在把 ${labelCounts.length} 个原始标签归并成不超过 ${target} 个规范主题…`);
 
-  // 推理模型偶尔会返回 {"topics":[]} 或漏掉大半标签。
-  // 这种情况必须重试，绝不能把半成品当成归并结果写下去。
+  // 标签一多（实测 840 个），一次性丢给模型会把端点打挂：提示词太长、推理爆预算、直接 504。
+  // 超过阈值就分块归并，再把中间主题名归并一次。
+  const CHUNK = 80;
   let best = null;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+
+  if (labelCounts.length > 150) {
+    const chunks = [];
+    for (let i = 0; i < labelCounts.length; i += CHUNK) chunks.push(labelCounts.slice(i, i + CHUNK));
+    log(`  标签较多，分 ${chunks.length} 批归并`);
+
+    const intermediate = [];
+    for (const [index, chunk] of chunks.entries()) {
+      const chunkTarget = Math.max(4, Math.round((target * chunk.length) / labelCounts.length));
+      const { data } = await client.json({
+        system: MERGE_SYSTEM,
+        user: mergePrompt(chunk, chunkTarget),
+        maxTokens: Math.min(8000, 2000 + chunk.length * 8),
+        temperature: 0,
+      });
+      const { topics } = normalizeMerge(data, chunk.map((item) => item.label));
+      intermediate.push(...topics);
+      log(`    第 ${index + 1}/${chunks.length} 批：${chunk.length} 个标签 → ${topics.length} 个主题`);
+    }
+
+    // 第二遍：把中间主题名再归并成最终主题，并把 aliases 传递下去
+    const aliasByLabel = new Map(intermediate.map((topic) => [topic.label, topic.aliases]));
+    const names = intermediate.map((topic) => ({ label: topic.label, count: 1 }));
     const { data, usage } = await client.json({
       system: MERGE_SYSTEM,
-      user: mergePrompt(labelCounts, target),
-      maxTokens: 4000,
+      user: mergePrompt(names, target),
+      maxTokens: Math.min(8000, 2000 + names.length * 20),
       temperature: 0,
     });
 
-    const result = normalizeMerge(data, knownLabels);
-    const covered = knownLabels.length - result.missing.length;
-    const good = result.topics.length > 1 && covered >= knownLabels.length * 0.75;
+    const finalMerge = normalizeMerge(data, names.map((n) => n.label));
+    for (const topic of finalMerge.topics) {
+      const expanded = new Set();
+      for (const alias of topic.aliases) {
+        expanded.add(alias);
+        for (const original of aliasByLabel.get(alias) ?? []) expanded.add(original);
+      }
+      topic.aliases = [...expanded].filter((alias) => knownLabels.includes(alias));
+    }
 
-    if (!best || covered > best.covered) best = { result, usage, covered };
-    if (good) break;
+    const covered = knownLabels.length - finalMerge.missing.length;
+    best = { result: finalMerge, usage, covered };
+  } else {
+    // 推理模型偶尔会返回 {"topics":[]} 或漏掉大半标签。
+    // 这种情况必须重试，绝不能把半成品当成归并结果写下去。
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const { data, usage } = await client.json({
+        system: MERGE_SYSTEM,
+        user: mergePrompt(labelCounts, target),
+        // 标签越多，输出越长；推理模型还要额外预算
+        maxTokens: Math.min(16000, 4000 + labelCounts.length * 6),
+        temperature: 0,
+      });
 
-    log(`  · 第 ${attempt} 次归并只覆盖 ${covered}/${knownLabels.length} 个标签、产出 ${result.topics.length} 个主题，重试…`);
+      const result = normalizeMerge(data, knownLabels);
+      const covered = knownLabels.length - result.missing.length;
+      const good = result.topics.length > 1 && covered >= knownLabels.length * 0.75;
+
+      if (!best || covered > best.covered) best = { result, usage, covered };
+      if (good) break;
+
+      log(`  · 第 ${attempt} 次归并只覆盖 ${covered}/${knownLabels.length} 个标签、产出 ${result.topics.length} 个主题，重试…`);
+    }
   }
 
   if (!best || best.result.topics.length <= 1) {
