@@ -12,6 +12,9 @@
     "self-test": "node export.mjs --self-test",
     "topics": "node tools/topics.mjs",
     "graph": "node tools/graph.mjs",
+    "embed": "node tools/embed.mjs",
+    "ask": "node tools/ask.mjs",
+    "atlas": "node tools/atlas.mjs",
     "test": "node --test"
   },
   "engines": {
