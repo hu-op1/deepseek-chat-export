@@ -159,6 +159,7 @@ export function main(argv = process.argv.slice(2)) {
         title: entry?.title ?? hit.item?.title ?? '',
         month: monthOfValue(entry?.updated_at) ?? hit.item?.month ?? '',
         snippet,
+        date: entry?.updated_at ?? null,
         summary: notes.get(hit.id)?.summary ?? '',
         topics: topicLabelsOf(notes.get(hit.id)?.topics),
         messageCount,
@@ -239,6 +240,7 @@ export function main(argv = process.argv.slice(2)) {
         title: e.title || '(无标题)',
         month: monthOfValue(e.updated_at) ?? '',
         summary: notes.get(id)?.summary ?? '',
+        date: notes.get(id)?.date ?? e.updated_at,
         topics: topicLabelsOf(notes.get(id)?.topics, 3),
       }));
 
@@ -315,7 +317,7 @@ export function main(argv = process.argv.slice(2)) {
           const bucket = byMonth.get(month);
           bucket.total += 1;
           for (const tid of info.topics ?? []) bucket.topicCount.set(tid, (bucket.topicCount.get(tid) ?? 0) + 1);
-          bucket.items.push({ id, title: info.title, summary: info.summary });
+          bucket.items.push({ id, title: info.title, summary: info.summary, date: info.date ?? null });
         }
 
         const months = [...byMonth.values()]
