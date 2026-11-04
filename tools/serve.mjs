@@ -92,35 +92,27 @@ export function main(argv = process.argv.slice(2)) {
   // 任务页一次只跑一个；进度靠临时接管 console.log 采集
   const taskState = { running: false, name: null, title: null, log: [], code: null, startedAt: null, finishedAt: null };
 
-  const getIndex = () => {
-    cache.index ??= loadIndex(dataDir);
-    return cache.index;
+  /**
+   * 带修改时间校验的 JSON 缓存。
+   *
+   * 两个坑都踩过：
+   *   1. 把"文件还没生成"缓存住，之后生成了页面也永远 404；
+   *   2. 在另一个终端重新生成了文件，服务还在用旧内容（图谱从 80 个主题退回 30 个）。
+   * 所以只缓存"读到了且在 mtime 没变"的结果。
+   */
+  const jsonCache = (file, slot) => {
+    if (!fs.existsSync(file)) return false;
+    const mtime = fs.statSync(file).mtimeMs;
+    if (cache[slot] && cache[`${slot}Mtime`] === mtime) return cache[slot];
+    cache[slot] = JSON.parse(fs.readFileSync(file, 'utf8'));
+    cache[`${slot}Mtime`] = mtime;
+    return cache[slot];
   };
 
-  const getVectors = () => {
-    if (cache.vectors !== null) return cache.vectors;
-    const file = path.join(outDir, 'vectors.json');
-    // 别把'文件还没生成'缓存住，否则生成后页面永远 404
-    if (!fs.existsSync(file)) return false;
-    cache.vectors = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return cache.vectors;
-  };
-
-  const getAtlas = () => {
-    if (cache.atlas !== null) return cache.atlas;
-    const file = path.join(outDir, 'atlas.json');
-    if (!fs.existsSync(file)) return false;
-    cache.atlas = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return cache.atlas;
-  };
-
-  const getGraph = () => {
-    if (cache.graph !== null) return cache.graph;
-    const file = path.join(outDir, 'graph.json');
-    if (!fs.existsSync(file)) return false;
-    cache.graph = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return cache.graph;
-  };
+  const getIndex = () => jsonCache(path.join(dataDir, 'index.json'), 'index') || loadIndex(dataDir);
+  const getVectors = () => jsonCache(path.join(outDir, 'vectors.json'), 'vectors');
+  const getAtlas = () => jsonCache(path.join(outDir, 'atlas.json'), 'atlas');
+  const getGraph = () => jsonCache(path.join(outDir, 'graph.json'), 'graph');
 
   const readSession = (entry) => JSON.parse(fs.readFileSync(path.join(dataDir, entry.file), 'utf8'));
 
@@ -405,18 +397,35 @@ export function main(argv = process.argv.slice(2)) {
             return send(400, JSON.stringify({ error: `没有这个任务：${payload?.name}` }), 'application/json; charset=utf-8');
           }
 
-          const vectors = getVectors();
           const env = { baseUrl: currentBaseUrl(), apiKey: currentKey() };
 
-          // 任务在后台跑，页面轮询 /api/task 看日志
-          executeTask(taskState, payload.name, payload.params ?? {}, env).then(() => {
-            // 产物变了，清掉缓存让页面立刻能看到
-            cache.vectors = null;
-            cache.atlas = null;
-            cache.graph = null;
+          // 先把状态占住再回 202：否则"响应已发出、任务还没开始"这条缝里，
+          // 第二个请求会看到 running=false 而溜进来。
+          taskState.running = true;
+          taskState.name = payload.name;
+          taskState.title = task.title;
+          taskState.log = ['启动中…'];
+          taskState.code = null;
+          taskState.startedAt = Date.now();
+          taskState.finishedAt = null;
+
+          send(202, JSON.stringify({ ok: true, name: payload.name }), 'application/json; charset=utf-8');
+
+          setImmediate(() => {
+            executeTask(taskState, payload.name, payload.params ?? {}, env)
+              .then(() => {
+                // 产物变了，清掉缓存让页面立刻能看到
+                cache.vectors = null;
+                cache.atlas = null;
+                cache.graph = null;
+              })
+              .catch((error) => {
+                taskState.log.push(`! 任务异常：${oneLine(error)}`);
+                taskState.running = false;
+              });
           });
 
-          return send(202, JSON.stringify({ ok: true, name: payload.name }), 'application/json; charset=utf-8');
+          return;
         }
       }
 

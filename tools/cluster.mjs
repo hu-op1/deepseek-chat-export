@@ -21,7 +21,7 @@ import { atomicWriteJson } from '../lib/store.mjs';
 import { oneLine } from '../lib/util.mjs';
 
 const SPEC = {
-  k: { type: 'number', default: 30, desc: '聚成多少类（默认 30）' },
+  k: { type: 'number', default: 0, desc: '聚成多少类（默认按标签数自适应：约每 12 个标签一类，上限 80）' },
   out: { type: 'string', default: 'memory', desc: '目录（默认 memory）' },
   'api-key': { type: 'string', desc: '嵌入端点 Key（也可用环境变量 DS_API_KEY）' },
   iterations: { type: 'number', default: 60, desc: 'k-means 迭代次数' },
@@ -145,7 +145,11 @@ export async function main(argv = process.argv.slice(2)) {
 
   const conversationCache = JSON.parse(fs.readFileSync(vectorFile, 'utf8'));
   const { baseUrl, model } = conversationCache;
-  log(`标签：${labels.length} 种，目标 ${options.k} 类`);
+
+  // 固定的 k 是之前的问题：840 个标签塞进 30 类，每类 28 个，必然混进不相干的东西。
+  // 默认按标签数量估算，每 12 个标签一类，夹在 15-80 之间。
+  const k = options.k > 0 ? options.k : Math.min(80, Math.max(15, Math.round(labels.length / 12)));
+  log(`标签：${labels.length} 种，目标 ${k} 类${options.k > 0 ? '（手动指定）' : '（按标签数自适应）'}`);
   log(`嵌入端点：${model} @ ${baseUrl}`);
 
   // 标签向量单独缓存：换 k 不必重新嵌入
@@ -192,7 +196,7 @@ export async function main(argv = process.argv.slice(2)) {
   log('正在聚类…');
   const { assignments, centroids } = kmeans(
     items.map((item) => item.vector),
-    Math.min(options.k, items.length),
+    Math.min(k, items.length),
     options.iterations,
   );
 
@@ -228,14 +232,14 @@ export async function main(argv = process.argv.slice(2)) {
   topics.sort((a, b) => b.aliases.length - a.aliases.length);
   const canonical = {
     generatedAt: new Date().toISOString(),
-    grain: options.k,
+    grain: k,
     method: 'embedding-kmeans',
     topics: topics.map((topic, index) => ({ id: `c${index + 1}`, label: topic.label, aliases: topic.aliases })),
     stats: {
       rawLabels: labels.length,
       canonicalTopics: topics.length,
       model,
-      k: options.k,
+      k,
     },
   };
 
