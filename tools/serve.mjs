@@ -72,7 +72,7 @@ function localMonth(ms) {
 export function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv, SPEC);
   if (options.help) {
-    log(usage('本地 web 界面：概览 / 搜索 / 对话阅读 / 星座图 / 主题图谱', SPEC));
+    log(usage('本地 web 界面：概览 / 搜索 / 对话阅读 / 星座图 / 主题图谱 / 任务', SPEC));
     return;
   }
 
