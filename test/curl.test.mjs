@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 
 import { deriveMessagesRequest, describeCurl, getHeader, parseCurl } from '../lib/curl.mjs';
 
+// 夹具里的 authorization 是合成值，不是凭证（签名段是纯字面量占位符）
 const BASH_CURL = `curl 'https://chat.deepseek.com/api/v0/chat_session/fetch_page?count=100' \\
   -H 'accept: */*' \\
-  -H 'authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def456' \\
+  -H 'authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.FAKE_SIGNATURE_NOT_A_REAL_ONE' \\
   -H 'cookie: intercom=abc; ds_session=xyz' \\
   -H 'referer: https://chat.deepseek.com/' \\
   --compressed`;
@@ -16,7 +17,7 @@ test('解析 bash 风格的 Copy as cURL', () => {
   assert.equal(parsed.url, 'https://chat.deepseek.com/api/v0/chat_session/fetch_page?count=100');
   assert.equal(parsed.method, 'GET');
   assert.equal(parsed.body, null);
-  assert.equal(getHeader(parsed.headers, 'authorization'), 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def456');
+  assert.equal(getHeader(parsed.headers, 'authorization'), 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.FAKE_SIGNATURE_NOT_A_REAL_ONE');
   assert.equal(getHeader(parsed.headers, 'cookie'), 'intercom=abc; ds_session=xyz');
   // 没有值的开关（--compressed）不能把后面的参数吃掉
   assert.equal(parsed.headers.length, 4);

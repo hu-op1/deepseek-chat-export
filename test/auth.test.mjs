@@ -3,8 +3,14 @@ import assert from 'node:assert/strict';
 
 import { collectTokenCandidates, findToken, isJwtLike, looksLikeToken, maskToken, scanJsonForToken } from '../lib/auth.mjs';
 
-const JWT =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+/**
+ * 合成夹具，不是凭证。
+ * header  {"alg":"HS256"}  payload {"sub":"test"}  签名段是纯字面量占位符。
+ * （测试只需要"长得像 JWT"，不需要它是合法签名）
+ */
+const FAKE_JWT_HEADER = 'eyJhbGciOiJIUzI1NiJ9';
+const FAKE_JWT_PAYLOAD = 'eyJzdWIiOiJ0ZXN0In0';
+const JWT = `${FAKE_JWT_HEADER}.${FAKE_JWT_PAYLOAD}.FAKE_SIGNATURE_NOT_A_REAL_ONE`;
 
 // 这一段就是 JSON.stringify(localStorage) 的真实形状：值本身是被转义过的 JSON 字符串
 const LOCAL_STORAGE_BLOB = `{"userToken":"{\\"value\\":\\"${JWT}\\",\\"__version\\":\\"0\\"}","theme":"dark","lastActive":"1700000000000"}`;
