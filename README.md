@@ -1,4 +1,4 @@
-# DeepSeek 对话备份（ds-chat-export）
+# DeepSeek 对话备份（deepseek-chat-export）
 
 把 DeepSeek 网页端（chat.deepseek.com）**你自己账号**的全部历史对话，完整备份成本地 JSON。
 

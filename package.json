@@ -1,11 +1,11 @@
 {
-  "name": "ds-chat-export",
+  "name": "deepseek-chat-export",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "把 DeepSeek 网页端的全部历史对话备份成本地 JSON",
   "bin": {
-    "ds-chat-export": "./export.mjs"
+    "ds-export": "./export.mjs"
   },
   "scripts": {
     "export": "node export.mjs",
