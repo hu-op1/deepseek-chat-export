@@ -24,7 +24,7 @@ import { renderAtlasHtml } from '../lib/atlas-html.mjs';
 import { renderGraphHtml } from '../lib/graph-html.mjs';
 import { loadIndex } from '../lib/store.mjs';
 import { firstUserText, monthOf, sessionMessages } from '../lib/topics.mjs';
-import { layout, renderChat, renderChatList, renderError, renderOverview, renderSearch, renderTasks, renderTimeline } from '../lib/web.mjs';
+import { layout, renderChat, renderChatList, renderError, renderOverview, renderRhythm, renderSearch, renderTasks, renderTimeline } from '../lib/web.mjs';
 import { renderAtlas3dHtml } from '../lib/atlas3d-html.mjs';
 import { TASKS, executeTask } from '../lib/tasks.mjs';
 import { loadConfig, resolveRuntime, saveConfig } from '../lib/config.mjs';
@@ -69,6 +69,13 @@ function monthOfValue(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return null;
   return monthOf(n > 1e11 ? n : n * 1000);
+}
+
+/** 本地时区的 YYYY-MM-DD。 */
+function dayOfMillis(ms) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /** 本地时区的 YYYY-MM（toISOString 是 UTC，会跨月错位）。 */
@@ -228,6 +235,95 @@ export function main(argv = process.argv.slice(2)) {
   }
 
 
+
+  // 作息统计：读全部会话文件（48MB），按索引版本缓存
+  const rhythmCache = { key: null, value: null };
+  function rhythmStats() {
+    const index = getIndex();
+    const key = `${index.updatedAt ?? ''}|${Object.keys(index.sessions).length}`;
+    if (rhythmCache.key === key) return rhythmCache.value;
+
+    const hours = new Array(24).fill(0);
+    const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
+    const days = new Set();
+    const dayFirst = new Map();
+    const dayLast = new Map();
+    let total = 0;
+    let night = 0;
+    let earliest = null;
+    let latest = null;
+
+    for (const entry of Object.values(index.sessions)) {
+      if (!entry.file) continue;
+      let session;
+      try {
+        session = JSON.parse(fs.readFileSync(path.join(dataDir, entry.file), 'utf8'));
+      } catch {
+        continue;
+      }
+      for (const message of session.messages ?? []) {
+        if (message.role !== 'USER') continue;
+        const stamp = Number(message.inserted_at);
+        if (!Number.isFinite(stamp) || stamp <= 0) continue;
+        const millis = stamp > 1e11 ? stamp : stamp * 1000;
+        const when = new Date(millis);
+        if (Number.isNaN(when.getTime())) continue;
+
+        const hour = when.getHours();
+        const weekday = (when.getDay() + 6) % 7; // 周一 = 0
+        hours[hour] += 1;
+        grid[weekday][hour] += 1;
+        days.add(`${when.getFullYear()}-${when.getMonth() + 1}-${when.getDate()}`);
+        total += 1;
+        if (hour <= 5) night += 1;
+
+        const clock = `${String(hour).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`;
+        // 极端记录统计的是"一天里的时刻"，不是最早期/最晚期的日期
+        const minuteOfDay = hour * 60 + when.getMinutes();
+        const label = `${clock}（${dayOfMillis(millis)}）`;
+        if (!earliest || minuteOfDay < earliest.minute) earliest = { minute: minuteOfDay, label };
+        if (!latest || minuteOfDay > latest.minute) latest = { minute: minuteOfDay, label };
+
+        const dayKey = dayOfMillis(millis);
+        if (!dayFirst.has(dayKey) || minuteOfDay < dayFirst.get(dayKey)) dayFirst.set(dayKey, minuteOfDay);
+        if (!dayLast.has(dayKey) || minuteOfDay > dayLast.get(dayKey)) dayLast.set(dayKey, minuteOfDay);
+      }
+    }
+
+    // 典型的一天：每天第一条 / 最后一条的时刻，取中位数（极端值没信息量，2300 多条里必然有 00:00）
+    const median = (values) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+    };
+    const clockOf = (minutes) => {
+      const hh = String(Math.floor(minutes / 60)).padStart(2, '0');
+      const mm = String(minutes % 60).padStart(2, '0');
+      return `${hh}:${mm}`;
+    };
+
+    const peakCount = Math.max(...hours, 1);
+    const bestHour = hours.indexOf(peakCount);
+    const value = {
+      hours,
+      grid,
+      stats: {
+        total,
+        nightPercent: total ? Math.round((night / total) * 100) : 0,
+        days: days.size,
+        perDay: days.size ? (total / days.size).toFixed(1) : 0,
+        activeHours: hours.filter((n) => n > 0).length,
+        peakHour: total ? String(bestHour) : '',
+        peakCount,
+        typicalStart: days.size ? clockOf(median([...dayFirst.values()])) : '',
+        typicalEnd: days.size ? clockOf(median([...dayLast.values()])) : '',
+        earliest: earliest?.label ?? '',
+        latest: latest?.label ?? '',
+      },
+    };
+    rhythmCache.key = key;
+    rhythmCache.value = value;
+    return value;
+  }
   /** 每段对话的标注（摘要、主题、实体），来自 graph.json；没有就返回空表。 */
   function conversationNotes() {
     const graph = getGraph();
@@ -360,6 +456,9 @@ export function main(argv = process.argv.slice(2)) {
         return page(layout({ title: '对话档案', active: 'home', body: renderOverview(overview) }));
       }
 
+      if (url.pathname === '/rhythm') {
+        return page(layout({ title: '作息', active: 'rhythm', body: renderRhythm(rhythmStats()) }));
+      }
       if (url.pathname === '/timeline') {
         const graph = getGraph();
         if (!graph?.conversations) {
