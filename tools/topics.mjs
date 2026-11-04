@@ -37,6 +37,7 @@ const SPEC = {
   out: { type: 'string', default: 'memory', desc: '输出目录（默认 memory）' },
   limit: { type: 'number', default: 0, desc: '只标注最近 N 个（先小样本试质量）' },
   force: { type: 'boolean', desc: '忽略已有标注，全部重标' },
+  'redo-stale': { type: 'boolean', desc: '重标那些上次用了更小 --max-chars 的对话（额度变大后补跑用）' },
   'merge-only': { type: 'boolean', desc: '只重跑归并步骤' },
   'max-chars': { type: 'number', default: 1000000, desc: '每个对话送进模型的字符上限（默认不限；超出模型上下文时会自动减半重试）' },
   grain: { type: 'number', default: 30, desc: '归并后的主题数量（默认 30）' },
@@ -217,9 +218,38 @@ export async function main(argv = process.argv.slice(2)) {
     return 1;
   }
 
+  // 已有标注就跳过，除非 --force。
+  // 但如果上一次是用更小的 --max-chars 标的（旧记录甚至是截断过的），
+  // 那就该用更大的预算重标一遍——--redo-stale 就是干这个的。
+  const recordPath = (id) => path.join(topicDir, `${id}.json`);
+  const readMeta = (id) => {
+    try {
+      return JSON.parse(fs.readFileSync(recordPath(id), 'utf8'))?.meta ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const budget = options['max-chars'];
+  const isStale = (entry) => {
+    if (!fs.existsSync(recordPath(entry.id))) return false;
+    const meta = readMeta(entry.id);
+    if (!meta) return true; // 记录损坏，值得重来
+    const usedBudget = Number(meta.maxChars ?? 0);
+    return usedBudget < budget;
+  };
+
   const needsAnnotate = options.force
     ? all
-    : all.filter((entry) => !fs.existsSync(path.join(topicDir, `${entry.id}.json`)));
+    : all.filter(
+        (entry) =>
+          !fs.existsSync(recordPath(entry.id)) || (options['redo-stale'] && isStale(entry)),
+      );
+
+  if (!options.force && options['redo-stale']) {
+    const stale = all.filter(isStale).length;
+    log(`--redo-stale：发现 ${stale} 个是用更小预算标的，会重标`);
+  }
   const scoped = options.limit > 0 ? needsAnnotate.slice(0, options.limit) : needsAnnotate;
 
   if (!options['merge-only']) {
@@ -304,6 +334,8 @@ export async function main(argv = process.argv.slice(2)) {
             model: options.model,
             annotatedAt: new Date().toISOString(),
             fullChars,
+            chars, // 实际送入的字符数
+            maxChars: budget, // 当时配置的预算，--redo-stale 靠它判断要不要重标
             truncated,
             tokens: usage?.total_tokens ?? null,
           },
