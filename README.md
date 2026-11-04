@@ -97,6 +97,43 @@ node export.mjs --from-curl request.txt
 这个模式只改请求里的分页参数和 `chat_session_id`，其余请求头原样保留，
 所以即使接口加了新校验也能继续用。
 
+## 主题图谱（可选）
+
+备份完之后，可以把 497 个对话变成一张「我这两年都在关心什么」的图。
+**这一步需要你自己接一个模型**（OpenAI 兼容协议，DeepSeek 官方、OpenRouter、硅基流动、本地 vLLM 都行）。
+
+```powershell
+# 1) 先标 20 个，看看模型给的标签准不准
+node tools/topics.mjs --base-url https://api.deepseek.com/v1 --model deepseek-chat --limit 20
+
+# 2) 满意后全量（已标的自动跳过，可以断点续跑）
+node tools/topics.mjs --base-url https://api.deepseek.com/v1 --model deepseek-chat
+
+# 3) 生成图谱和页面
+node tools/graph.mjs --open
+```
+
+API Key 用 `--api-key` 传，或者放环境变量 `DS_API_KEY`。
+
+产出：
+
+```
+memory/
+  topics/<id>.json   每个对话的标注（可以手工改，改完只需重跑 graph）
+  canonical.json     原始标签 → 30 个规范主题的映射
+  graph.json         聚合结果
+  graph.html         双击打开的可视化页面（自包含，无 CDN）
+```
+
+页面有三个部分：**主题流向**（每个月各主题的对话数）、**主题网络**（哪些关心常一起出现）、
+**详情面板**（点任一主题看它的对话）。
+
+成本：497 次调用、约 200 万字符输入，用 DeepSeek 官方价是几块到几十块；
+接自己的模型按你的价算。`memory/` 含对话标题和摘要，**已加进 `.gitignore`，不会入库**。
+
+设计取舍写在 [主题图谱设计文档](docs/superpowers/specs/2026-11-04-topic-graph-design.md)，
+包括为什么**不用嵌入直接聚类**——简单说：簇没有名字，最后还是得让模型起名，多绕两层还丢了可解释性。
+
 ## 已知的局限
 
 - 只备份**当前登录账号**的对话，不涉及别人的数据；请勿把导出的内容到处传播。
@@ -131,18 +168,25 @@ node export.mjs --from-curl request.txt
 ## 开发
 
 ```powershell
-node --test        # 40 个测试：token 嗅探、cURL 解析、响应容错、增量逻辑、端到端
+node --test        # 75 个测试，全部不依赖外网
 ```
 
-测试里包含一个本地假服务器，完整模拟"翻页 → 抓消息 → 落盘 → 二次运行全部跳过"，
-不需要真 token 也不访问外网。
+测试里有本地假服务器：一个模拟 DeepSeek 的备份接口，一个模拟 OpenAI 兼容的模型端点，
+所以"抓取 → 落盘 → 二次跳过"和"标注 → 归并 → 出图"两条链路都能在离线状态下验证。
 
 ```
-export.mjs        命令行入口
-lib/auth.mjs      取 token、嗅探 JWT（不依赖 localStorage 键名）
-lib/curl.mjs      cURL 解析与请求推导
-lib/extract.mjs   响应归一化（路径找不到时按形状识别）
-lib/api.mjs       传输层：两种模式、重试、退避、错误分类、分页策略
-lib/store.mjs     文件名、索引、增量差异、原子写入
-docs/             设计文档
+export.mjs           备份入口
+tools/topics.mjs     标注 + 归并
+tools/graph.mjs      聚合 + 渲染页面
+
+lib/auth.mjs         token 嗅探（不依赖 localStorage 键名，字段名优先级高于 JWT 形状）
+lib/curl.mjs         cURL 解析与请求推导
+lib/extract.mjs      响应归一化（路径找不到时按形状识别）
+lib/api.mjs          传输层：两种模式、重试、退避、错误分类、游标分页
+lib/store.mjs        文件名、索引、增量差异、原子写入
+lib/llm.mjs          OpenAI 兼容客户端 + JSON 容错提取
+lib/topics.mjs       提示词、标注归一化、标签归并、聚合（纯函数，可单测）
+lib/graph-html.mjs   图谱页面渲染（自包含 HTML）
+lib/args.mjs         命令行参数解析
+docs/                设计文档
 ```

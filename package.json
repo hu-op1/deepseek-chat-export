@@ -10,6 +10,8 @@
   "scripts": {
     "export": "node export.mjs",
     "self-test": "node export.mjs --self-test",
+    "topics": "node tools/topics.mjs",
+    "graph": "node tools/graph.mjs",
     "test": "node --test"
   },
   "engines": {
