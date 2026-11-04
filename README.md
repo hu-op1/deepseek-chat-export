@@ -24,19 +24,23 @@ node app.mjs --open
 | 星座图 / 主题图谱 | 语义投影与主题流向 |
 | 任务 | 导出 / 向量 / 标注 / 归并 / 出图，一键运行并看日志 |
 
-首次使用：进「任务」页 → 填登录凭证 → 运行「导出对话」。
-凭证获取方式：浏览器打开 chat.deepseek.com 并已登录 → F12 → Console →
-粘贴 `copy(JSON.stringify(localStorage))` → 把结果粘进表单。
+首次使用，全在「任务」页上点：
+
+1. **端点设置** — 填端点地址、API Key、嵌入模型、对话模型，点保存（存到 `memory/config.json`，下次自动读取）。
+   旁边的「拉取模型列表」会把端点支持的模型名抓回来，填进输入框的提示。
+2. **接口自检** — 不带凭证探测 DeepSeek 接口还活着没。抓不动时先点这个，
+   能区分"接口改版了"和"凭证过期了"。
+3. **导出对话** — 粘贴登录凭证，运行。凭证获取方式：浏览器打开 chat.deepseek.com 并已登录 →
+   F12 → Console → 粘贴 `copy(JSON.stringify(localStorage))` → 把结果粘进表单。
+4. 之后依次点「建立向量」「标注主题」「归并标签」「生成主题图谱」。
+   每一步都可以随时中断，已完成的会跳过。
 
 这只是把**你自己浏览器的登录信息**复制过来，只用于请求 DeepSeek 自己的接口，不会发往第三方。
-服务只监听 `127.0.0.1`。
-
-启动参数（可选的都很简单）：
+服务只监听 `127.0.0.1`。API Key 明文存在 `memory/config.json`（已在 `.gitignore` 里），
+不想落盘就用环境变量 `DS_API_KEY`，命令行参数优先级最高。
 
 ```powershell
-node app.mjs --port 8080          # 换端口
-node app.mjs --base-url https://…  # 模型端点（也可让它从已有向量缓存里读）
-node app.mjs --api-key sk-…        # 或用环境变量 DS_API_KEY
+node app.mjs --port 8080     # 想换端口才需要参数
 ```
 
 命令行工具仍然存在（`export.mjs`、`tools/*.mjs`），但只是给自动化和调试用的，

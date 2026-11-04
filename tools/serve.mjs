@@ -26,6 +26,7 @@ import { loadIndex } from '../lib/store.mjs';
 import { firstUserText, monthOf, sessionMessages } from '../lib/topics.mjs';
 import { layout, renderChat, renderError, renderOverview, renderSearch, renderTasks } from '../lib/web.mjs';
 import { TASKS, executeTask } from '../lib/tasks.mjs';
+import { loadConfig, resolveRuntime, saveConfig } from '../lib/config.mjs';
 import { oneLine } from '../lib/util.mjs';
 
 const SPEC = {
@@ -78,7 +79,12 @@ export function main(argv = process.argv.slice(2)) {
 
   const dataDir = path.resolve(options.data);
   const outDir = path.resolve(options.out);
-  const apiKey = options['api-key'] ?? process.env.DS_API_KEY ?? process.env.OPENAI_API_KEY ?? null;
+
+  // 端点和 Key 的优先级：命令行 > 环境变量 > memory/config.json（网页上保存的）
+  const runtime = resolveRuntime({ outDir, flagBaseUrl: options['base-url'], flagApiKey: options['api-key'] });
+
+  const currentBaseUrl = () => runtime.baseUrl || getVectors()?.baseUrl || '';
+  const currentKey = () => runtime.apiKey || runtime.config.apiKey || '';
 
   // 全部按需加载并缓存：启动时不读 10MB 向量文件
   const cache = { index: null, vectors: null, atlas: null, graph: null };
@@ -124,11 +130,12 @@ export function main(argv = process.argv.slice(2)) {
     if (!vectors) {
       return { hits: [], error: '还没有向量缓存。先运行：node tools/embed.mjs --base-url … --model …' };
     }
-    if (!apiKey) {
+    const key = currentKey();
+    if (!key) {
       return { hits: [], error: '服务端没有 API Key，无法把查询词嵌入。重启时加上 --api-key 或设置 DS_API_KEY。' };
     }
 
-    const client = createEmbeddingClient({ baseUrl: vectors.baseUrl, apiKey, model: vectors.model });
+    const client = createEmbeddingClient({ baseUrl: vectors.baseUrl, apiKey: key, model: vectors.model });
     const [raw] = await client.embed([query]);
     if (!raw) return { hits: [], error: '嵌入端点没有返回向量。' };
 
@@ -307,7 +314,7 @@ export function main(argv = process.argv.slice(2)) {
 
       if (url.pathname === '/tasks') {
         const vectors = getVectors();
-        const baseUrl = vectors ? vectors.baseUrl : (options['base-url'] ?? null);
+        const baseUrl = currentBaseUrl();
         return page(
           layout({
             title: '任务',
@@ -315,10 +322,65 @@ export function main(argv = process.argv.slice(2)) {
             body: renderTasks({
               tasks: TASKS,
               endpoint: baseUrl ? `${vectors?.model ?? ''} @ ${baseUrl}`.trim() : '',
-              hasKey: Boolean(apiKey),
+              hasKey: Boolean(currentKey()),
+              config: { ...runtime.config, baseUrl },
             }),
           }),
         );
+      }
+
+      if (url.pathname === '/api/config') {
+        if (req.method === 'GET') {
+          return send(
+            200,
+            JSON.stringify({ ...runtime.config, apiKey: currentKey() ? '已保存' : '', baseUrl: currentBaseUrl() }),
+            'application/json; charset=utf-8',
+          );
+        }
+
+        if (req.method === 'POST') {
+          let payload;
+          try {
+            payload = JSON.parse(await readBody(req));
+          } catch {
+            return send(400, JSON.stringify({ error: '请求体不是合法 JSON' }), 'application/json; charset=utf-8');
+          }
+
+          // Key 留空表示"不修改"，避免每次保存都把已存的 Key 冲掉
+          const patch = { ...payload };
+          if (!String(patch.apiKey ?? '').trim()) delete patch.apiKey;
+
+          const saved = saveConfig(outDir, patch);
+          runtime.config = saved;
+          if (saved.baseUrl) runtime.baseUrl = saved.baseUrl;
+          if (saved.apiKey) runtime.apiKey = saved.apiKey;
+
+          return send(200, JSON.stringify({ ok: true, baseUrl: saved.baseUrl }), 'application/json; charset=utf-8');
+        }
+      }
+
+      if (url.pathname === '/api/models') {
+        const baseUrl = currentBaseUrl();
+        if (!baseUrl) {
+          return send(400, JSON.stringify({ error: '先填端点地址' }), 'application/json; charset=utf-8');
+        }
+        const key = currentKey();
+        try {
+          const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/models`, {
+            headers: key ? { authorization: `Bearer ${key}` } : {},
+            signal: AbortSignal.timeout(20000),
+          });
+          const text = await response.text();
+          let ids = [];
+          try {
+            ids = (JSON.parse(text).data ?? []).map((m) => m.id).filter(Boolean).sort();
+          } catch {
+            return send(502, JSON.stringify({ error: `端点没返回模型列表：${text.slice(0, 120)}` }), 'application/json; charset=utf-8');
+          }
+          return send(200, JSON.stringify({ models: ids }), 'application/json; charset=utf-8');
+        } catch (error) {
+          return send(502, JSON.stringify({ error: `拉取失败：${oneLine(error)}` }), 'application/json; charset=utf-8');
+        }
       }
 
       if (url.pathname === '/api/task') {
@@ -344,7 +406,7 @@ export function main(argv = process.argv.slice(2)) {
           }
 
           const vectors = getVectors();
-          const env = { baseUrl: vectors?.baseUrl ?? options['base-url'] ?? null, apiKey };
+          const env = { baseUrl: currentBaseUrl(), apiKey: currentKey() };
 
           // 任务在后台跑，页面轮询 /api/task 看日志
           executeTask(taskState, payload.name, payload.params ?? {}, env).then(() => {
@@ -366,7 +428,7 @@ export function main(argv = process.argv.slice(2)) {
             ok: true,
             conversations: Object.keys(getIndex().sessions).length,
             vectors: vectors ? Object.keys(vectors.items).length : 0,
-            hasKey: Boolean(apiKey),
+            hasKey: Boolean(currentKey()),
           }),
           'application/json; charset=utf-8',
         );
@@ -385,7 +447,7 @@ export function main(argv = process.argv.slice(2)) {
     log('');
     log(`对话档案 → ${target}`);
     log(`数据 ${dataDir} · 向量 ${outDir}`);
-    log(apiKey ? '语义搜索：可用（服务端持有 Key）' : '语义搜索：缺少 API Key（加 --api-key 或设 DS_API_KEY）');
+    log(currentKey() ? '语义搜索：可用（Key 已加载）' : '语义搜索：缺少 Key，去网页「任务」页填端点设置');
     log('只监听 127.0.0.1，按 Ctrl+C 停止');
     log('');
     if (options.open) execFile('cmd', ['/c', 'start', '', target], () => {});
