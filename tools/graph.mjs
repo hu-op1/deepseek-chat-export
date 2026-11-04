@@ -7,6 +7,7 @@
  */
 
 import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import process from 'node:process';
 import { execFile } from 'node:child_process';
@@ -44,8 +45,8 @@ function loadJsonl(dir) {
     .filter(Boolean);
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2), SPEC);
+export async function main(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv, SPEC);
   if (options.help) {
     log(usage('把标注聚合成主题图谱并渲染页面', SPEC));
     return 0;
@@ -108,11 +109,14 @@ async function main() {
   return 0;
 }
 
-main()
-  .then((code) => {
-    process.exitCode = code ?? 0;
-  })
-  .catch((error) => {
-    console.error(`\n出错了：${oneLine(error)}`);
-    process.exitCode = 1;
-  });
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectRun) {
+  main()
+    .then((code) => {
+      process.exitCode = code ?? 0;
+    })
+    .catch((error) => {
+      console.error(`\n出错了：${oneLine(error)}`);
+      process.exitCode = 1;
+    });
+}

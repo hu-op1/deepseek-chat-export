@@ -1,35 +1,46 @@
 # DeepSeek 对话备份（deepseek-chat-export）
 
-把 DeepSeek 网页端（chat.deepseek.com）**你自己账号**的全部历史对话，完整备份成本地 JSON。
+把 DeepSeek 网页端（chat.deepseek.com）**你自己账号**的全部历史对话，完整备份到本地，
+然后在一张本地网页里搜索、阅读、看主题图谱。
 
 网页端没有全量导出功能，也没有记忆——换个设备、清理缓存、或者哪天想翻回去看看，就都没了。
-这个脚本就是把它们抓下来存在硬盘里，跑第二遍时只抓新增和有改动的内容。
 
-## 三步开始
+## 开始
 
-需要 Node.js 20 以上（你这里已经是 v24）。
+需要 Node.js 20 以上。
 
 ```powershell
 cd E:\code\ds对话获取
-
-# 1) 先确认接口还在（不需要登录）
-node export.mjs --self-test
-
-# 2) 先抓 3 个试试，看看内容对不对
-node export.mjs --limit 3
-
-# 3) 满意了再全量
-node export.mjs
+node app.mjs --open
 ```
 
-第 2 步会停下来要一次登录凭证，按屏幕提示做就行：
+**只有一个命令。** 抓取、嵌入、标注、聚类、出图全都在网页的「任务」页里点，不用记参数。
 
-1. 浏览器打开 chat.deepseek.com 并确认已登录
-2. F12 → Console，粘贴执行 `copy(JSON.stringify(localStorage))`
-3. 回到终端，Ctrl+V 粘贴、回车
+| 页面 | 做什么 |
+| --- | --- |
+| 概览 | 对话数、每月分布、各产物状态 |
+| 搜索 | 一句话语义搜索 |
+| 对话阅读器 | 把 JSON 渲染成可读对话：思考过程折叠、代码块、搜索步骤 |
+| 星座图 / 主题图谱 | 语义投影与主题流向 |
+| 任务 | 导出 / 向量 / 标注 / 归并 / 出图，一键运行并看日志 |
 
-这一步只是把**你自己浏览器的登录信息**复制到剪贴板，脚本只会用它去请求 DeepSeek 自己的接口，
-不会发往任何第三方。凭证会缓存到 `data/.token`，下次不用再弄；删掉这个文件即可作废。
+首次使用：进「任务」页 → 填登录凭证 → 运行「导出对话」。
+凭证获取方式：浏览器打开 chat.deepseek.com 并已登录 → F12 → Console →
+粘贴 `copy(JSON.stringify(localStorage))` → 把结果粘进表单。
+
+这只是把**你自己浏览器的登录信息**复制过来，只用于请求 DeepSeek 自己的接口，不会发往第三方。
+服务只监听 `127.0.0.1`。
+
+启动参数（可选的都很简单）：
+
+```powershell
+node app.mjs --port 8080          # 换端口
+node app.mjs --base-url https://…  # 模型端点（也可让它从已有向量缓存里读）
+node app.mjs --api-key sk-…        # 或用环境变量 DS_API_KEY
+```
+
+命令行工具仍然存在（`export.mjs`、`tools/*.mjs`），但只是给自动化和调试用的，
+日常不需要碰——它们都能 `--help`。
 
 ## 备份长什么样
 

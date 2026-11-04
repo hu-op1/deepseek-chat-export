@@ -1,22 +1,14 @@
 {
   "name": "deepseek-chat-export",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "把 DeepSeek 网页端的全部历史对话备份成本地 JSON",
+  "description": "把 DeepSeek 网页端的全部历史对话备份到本地，并提供语义搜索、对话阅读与主题图谱",
   "bin": {
-    "ds-export": "./export.mjs"
+    "ds-chat-export": "./app.mjs"
   },
   "scripts": {
-    "export": "node export.mjs",
-    "self-test": "node export.mjs --self-test",
-    "topics": "node tools/topics.mjs",
-    "graph": "node tools/graph.mjs",
-    "embed": "node tools/embed.mjs",
-    "ask": "node tools/ask.mjs",
-    "atlas": "node tools/atlas.mjs",
-    "cluster": "node tools/cluster.mjs",
-    "serve": "node tools/serve.mjs",
+    "start": "node app.mjs",
     "test": "node --test"
   },
   "engines": {

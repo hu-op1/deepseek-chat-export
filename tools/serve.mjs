@@ -16,6 +16,7 @@ import http from 'node:http';
 import path from 'node:path';
 import process from 'node:process';
 import { execFile } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 import { parseArgs, usage } from '../lib/args.mjs';
 import { createEmbeddingClient, decodeVector, nearest, normalize } from '../lib/embed.mjs';
@@ -23,14 +24,16 @@ import { renderAtlasHtml } from '../lib/atlas-html.mjs';
 import { renderGraphHtml } from '../lib/graph-html.mjs';
 import { loadIndex } from '../lib/store.mjs';
 import { firstUserText, monthOf, sessionMessages } from '../lib/topics.mjs';
-import { layout, renderChat, renderError, renderOverview, renderSearch } from '../lib/web.mjs';
+import { layout, renderChat, renderError, renderOverview, renderSearch, renderTasks } from '../lib/web.mjs';
+import { TASKS, executeTask } from '../lib/tasks.mjs';
 import { oneLine } from '../lib/util.mjs';
 
 const SPEC = {
   port: { type: 'number', default: 7788, desc: '端口（默认 7788）' },
   data: { type: 'string', default: 'data', desc: '备份目录（默认 data）' },
   out: { type: 'string', default: 'memory', desc: '向量与图谱目录（默认 memory）' },
-  'api-key': { type: 'string', desc: '嵌入端点 Key（也可用环境变量 DS_API_KEY）' },
+  'base-url': { type: 'string', desc: '模型端点（OpenAI 兼容，也可从已有向量缓存里读）' },
+  'api-key': { type: 'string', desc: '模型端点 Key（也可用环境变量 DS_API_KEY）' },
   open: { type: 'boolean', desc: '启动后打开浏览器' },
   help: { type: 'boolean', alias: 'h', desc: '显示帮助' },
 };
@@ -39,6 +42,19 @@ const NAV_HTML = `<nav class="top" style="border-bottom:2px solid #1B1F24;margin
 <a href="/" style="text-decoration:none;color:#5A6470">← 返回档案</a></nav>`;
 
 const log = (m = '') => console.log(m);
+
+/** 读取请求体（任务参数是 JSON）。 */
+function readBody(req, limit = 2_000_000) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+      if (raw.length > limit) reject(new Error('请求体太大'));
+    });
+    req.on('end', () => resolve(raw));
+    req.on('error', reject);
+  });
+}
 
 /** updated_at 可能是秒也可能是毫秒。 */
 function monthOfValue(value) {
@@ -53,8 +69,8 @@ function localMonth(ms) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
-function main() {
-  const options = parseArgs(process.argv.slice(2), SPEC);
+export function main(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv, SPEC);
   if (options.help) {
     log(usage('本地 web 界面：概览 / 搜索 / 对话阅读 / 星座图 / 主题图谱', SPEC));
     return;
@@ -66,6 +82,9 @@ function main() {
 
   // 全部按需加载并缓存：启动时不读 10MB 向量文件
   const cache = { index: null, vectors: null, atlas: null, graph: null };
+
+  // 任务页一次只跑一个；进度靠临时接管 console.log 采集
+  const taskState = { running: false, name: null, title: null, log: [], code: null, startedAt: null, finishedAt: null };
 
   const getIndex = () => {
     cache.index ??= loadIndex(dataDir);
@@ -286,6 +305,59 @@ function main() {
         return send(200, JSON.stringify(result), 'application/json; charset=utf-8');
       }
 
+      if (url.pathname === '/tasks') {
+        const vectors = getVectors();
+        const baseUrl = vectors ? vectors.baseUrl : (options['base-url'] ?? null);
+        return page(
+          layout({
+            title: '任务',
+            active: 'tasks',
+            body: renderTasks({
+              tasks: TASKS,
+              endpoint: baseUrl ? `${vectors?.model ?? ''} @ ${baseUrl}`.trim() : '',
+              hasKey: Boolean(apiKey),
+            }),
+          }),
+        );
+      }
+
+      if (url.pathname === '/api/task') {
+        if (req.method === 'GET') {
+          return send(200, JSON.stringify(taskState), 'application/json; charset=utf-8');
+        }
+
+        if (req.method === 'POST') {
+          if (taskState.running) {
+            return send(409, JSON.stringify({ error: '已有任务在跑，等它结束' }), 'application/json; charset=utf-8');
+          }
+
+          let payload;
+          try {
+            payload = JSON.parse(await readBody(req));
+          } catch {
+            return send(400, JSON.stringify({ error: '请求体不是合法 JSON' }), 'application/json; charset=utf-8');
+          }
+
+          const task = TASKS[payload?.name];
+          if (!task) {
+            return send(400, JSON.stringify({ error: `没有这个任务：${payload?.name}` }), 'application/json; charset=utf-8');
+          }
+
+          const vectors = getVectors();
+          const env = { baseUrl: vectors?.baseUrl ?? options['base-url'] ?? null, apiKey };
+
+          // 任务在后台跑，页面轮询 /api/task 看日志
+          executeTask(taskState, payload.name, payload.params ?? {}, env).then(() => {
+            // 产物变了，清掉缓存让页面立刻能看到
+            cache.vectors = null;
+            cache.atlas = null;
+            cache.graph = null;
+          });
+
+          return send(202, JSON.stringify({ ok: true, name: payload.name }), 'application/json; charset=utf-8');
+        }
+      }
+
       if (url.pathname === '/api/health') {
         const vectors = getVectors();
         return send(
@@ -320,4 +392,5 @@ function main() {
   });
 }
 
-main();
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectRun) main();

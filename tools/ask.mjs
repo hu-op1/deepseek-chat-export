@@ -10,6 +10,7 @@
  */
 
 import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -49,9 +50,8 @@ function snippetOf(dataDir, entry, maxLen = 110) {
   }
 }
 
-async function main() {
-  const argv = process.argv.slice(2);
-  const options = parseArgs(argv, SPEC);
+export async function main(argv = process.argv.slice(2)) {
+    const options = parseArgs(argv, SPEC);
   if (options.help) {
     log(usage('语义搜索：用一句模糊描述找对话', SPEC, '例：node tools/ask.mjs "那次聊显存不够的事"'));
     return 0;
@@ -136,11 +136,14 @@ async function main() {
   return 0;
 }
 
-main()
-  .then((code) => {
-    process.exitCode = code ?? 0;
-  })
-  .catch((error) => {
-    console.error(`\n出错了：${oneLine(error)}`);
-    process.exitCode = 1;
-  });
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectRun) {
+  main()
+    .then((code) => {
+      process.exitCode = code ?? 0;
+    })
+    .catch((error) => {
+      console.error(`\n出错了：${oneLine(error)}`);
+      process.exitCode = 1;
+    });
+}
